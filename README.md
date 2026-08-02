@@ -18,7 +18,7 @@ pkgscope does not claim that a tool is “safe to uninstall,” does not infer a
 
 ## Status
 
-This repository contains the v0.2 pre-release implementation. It is suitable for local builds and testing. Public package names, signing credentials, and release-environment approval remain release gates; the release workflow refuses to silently substitute unsigned public artifacts.
+This repository contains the v0.2 pre-release implementation. Public release binaries are intentionally distributed without Apple Developer ID signing or notarization so the project can remain free to publish and maintain. See the installation warning below before using a downloaded binary.
 
 ## Highlights
 
@@ -114,11 +114,11 @@ The repository includes:
 
 - a native macOS release workflow for `aarch64-apple-darwin` and `x86_64-apple-darwin`;
 - checksum, SBOM, and GitHub build-provenance generation;
-- mandatory Developer ID signing and Apple notarization for public release jobs;
+- explicitly unsigned and unnotarized binaries, with no paid Apple Developer Program requirement;
 - an npm thin launcher with platform-specific optional dependencies and version matching;
 - a generated Homebrew formula with architecture-specific checksums.
 
-Release details and required secret names are documented in [docs/releasing.md](docs/releasing.md). Package/repository/search/trademark availability must be rechecked immediately before the first public release because `pkgscope` remains a working title.
+Because the binaries are unsigned, macOS may block or warn about a downloaded release. Do not bypass a security warning unless you trust this repository and have verified the downloaded file against `SHA256SUMS`. Release details are documented in [docs/releasing.md](docs/releasing.md). Package/repository/search/trademark availability must be rechecked immediately before the first public release because `pkgscope` remains a working title.
 
 ## License
 

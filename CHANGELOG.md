@@ -18,4 +18,4 @@ All notable changes are documented here. The project follows semantic versioning
 
 - Read-only v0.1 inventory core for Homebrew formulae/casks, npm global packages, pnpm global packages, pipx, persistent uv tools, and Cargo installs.
 - Manager-instance discovery, partial-success scanning, field provenance, size/date semantics, PATH resolution, findings, SQLite snapshots, removal planning, TUI, and schema-v1 output.
-- Isolated integration fixtures, security-focused unit tests, npm launcher, native packaging, and signed release automation.
+- Isolated integration fixtures, security-focused unit tests, npm launcher, native packaging, and release automation.
