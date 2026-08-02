@@ -248,6 +248,8 @@ fn pkgscope_command(home: &Path, mock_bin: &Path, cargo_home: &Path) -> Command 
     let mut command = Command::cargo_bin("pkgscope").unwrap();
     command
         .env("HOME", home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("XDG_DATA_HOME", home.join(".local/share"))
         .env("PATH", mock_bin)
         .env("CARGO_HOME", cargo_home)
         .env_remove("CARGO_INSTALL_ROOT")
