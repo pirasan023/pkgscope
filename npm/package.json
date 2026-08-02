@@ -1,0 +1,38 @@
+{
+  "name": "pkgscope",
+  "version": "0.2.0",
+  "description": "Inspect and uninstall developer tools from one terminal UI",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pirasan023/pkgscope.git"
+  },
+  "homepage": "https://github.com/pirasan023/pkgscope#readme",
+  "bugs": "https://github.com/pirasan023/pkgscope/issues",
+  "type": "commonjs",
+  "bin": {
+    "pkgscope": "bin/pkgscope.js"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "files": [
+    "bin/pkgscope.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "os": [
+    "darwin"
+  ],
+  "optionalDependencies": {
+    "@pkgscope/darwin-arm64": "0.2.0",
+    "@pkgscope/darwin-x64": "0.2.0"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  }
+}

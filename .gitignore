@@ -1,0 +1,7 @@
+/target/
+/.DS_Store
+*.swp
+*.tmp
+/npm/node_modules/
+/npm/platform-staging/
+

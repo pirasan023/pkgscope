@@ -1,0 +1,196 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: version
+        name: Validate versions and tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          cargo_version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)"
+          npm_version="$(jq -r .version npm/package.json)"
+          test "$version" = "$cargo_version"
+          test "$version" = "$npm_version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Require a clean release changelog entry
+        run: |
+          if grep -q '^## \[Unreleased\]$' CHANGELOG.md && ! grep -q "^## \[${{ steps.version.outputs.version }}\]" CHANGELOG.md; then
+            echo "CHANGELOG.md must contain a versioned release section" >&2
+            exit 1
+          fi
+
+  build-native:
+    needs: validate
+    environment: release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            npm_arch: arm64
+            macho_arch: arm64
+          - target: x86_64-apple-darwin
+            npm_arch: x64
+            macho_arch: x86_64
+    runs-on: macos-14
+    env:
+      APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.88.0
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Require signing and notarization credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in APPLE_CERTIFICATE_P12_BASE64 APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_TEAM_ID APPLE_APP_PASSWORD; do
+            if test -z "${!name:-}"; then
+              echo "Required release secret $name is missing" >&2
+              exit 1
+            fi
+          done
+      - name: Build and test
+        run: |
+          cargo test --locked
+          cargo build --release --locked --target "${{ matrix.target }}"
+      - name: Import Developer ID certificate
+        shell: bash
+        run: |
+          set -euo pipefail
+          keychain="$RUNNER_TEMP/pkgscope-signing.keychain-db"
+          certificate="$RUNNER_TEMP/developer-id.p12"
+          keychain_password="$(openssl rand -hex 24)"
+          printf '%s' "$APPLE_CERTIFICATE_P12_BASE64" | base64 -D > "$certificate"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$certificate" -k "$keychain" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain"
+          security list-keychains -d user -s "$keychain" login.keychain-db
+      - name: Sign, verify, archive, and notarize
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ needs.validate.outputs.version }}"
+          binary="target/${{ matrix.target }}/release/pkgscope"
+          staging="$RUNNER_TEMP/pkgscope-${{ matrix.target }}"
+          mkdir -p "$staging"
+          cp "$binary" "$staging/pkgscope"
+          codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$staging/pkgscope"
+          codesign --verify --strict --verbose=2 "$staging/pkgscope"
+          test "$(lipo -archs "$staging/pkgscope")" = "${{ matrix.macho_arch }}"
+          ditto -c -k --keepParent "$staging/pkgscope" "$RUNNER_TEMP/notarize-${{ matrix.target }}.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/notarize-${{ matrix.target }}.zip" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_PASSWORD" \
+            --wait
+          tar -C "$staging" -czf "pkgscope-v${version}-${{ matrix.target }}.tar.gz" pkgscope
+      - name: Generate CycloneDX SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          path: ${{ runner.temp }}/pkgscope-${{ matrix.target }}
+          format: cyclonedx-json
+          output-file: pkgscope-v${{ needs.validate.outputs.version }}-${{ matrix.target }}.cdx.json
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: pkgscope-v${{ needs.validate.outputs.version }}-${{ matrix.target }}.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pkgscope-${{ matrix.target }}
+          if-no-files-found: error
+          path: |
+            pkgscope-v${{ needs.validate.outputs.version }}-${{ matrix.target }}.tar.gz
+            pkgscope-v${{ needs.validate.outputs.version }}-${{ matrix.target }}.cdx.json
+
+  publish:
+    needs: [validate, build-native]
+    environment: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: pkgscope-*
+          path: dist
+      - name: Generate checksums and Homebrew formula
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ needs.validate.outputs.version }}"
+          find dist -type f \( -name '*.tar.gz' -o -name '*.cdx.json' \) -print0 | sort -z | xargs -0 sha256sum > dist/SHA256SUMS
+          arm_archive="dist/pkgscope-aarch64-apple-darwin/pkgscope-v${version}-aarch64-apple-darwin.tar.gz"
+          x64_archive="dist/pkgscope-x86_64-apple-darwin/pkgscope-v${version}-x86_64-apple-darwin.tar.gz"
+          arm_sha="$(sha256sum "$arm_archive" | awk '{print $1}')"
+          x64_sha="$(sha256sum "$x64_archive" | awk '{print $1}')"
+          sed \
+            -e "s/@VERSION@/$version/g" \
+            -e "s/@ARM64_SHA256@/$arm_sha/g" \
+            -e "s/@X64_SHA256@/$x64_sha/g" \
+            packaging/homebrew/pkgscope.rb.template > dist/pkgscope.rb
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - name: Publish platform npm packages with provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ needs.validate.outputs.version }}"
+          for tuple in "aarch64-apple-darwin arm64" "x86_64-apple-darwin x64"; do
+            set -- $tuple
+            target="$1"
+            npm_arch="$2"
+            package_dir="npm/platform-staging/darwin-${npm_arch}"
+            mkdir -p "$package_dir/bin"
+            tar -xzf "dist/pkgscope-${target}/pkgscope-v${version}-${target}.tar.gz" -C "$package_dir/bin"
+            cp LICENSE "$package_dir/LICENSE"
+            jq -n \
+              --arg name "@pkgscope/darwin-${npm_arch}" \
+              --arg version "$version" \
+              --arg cpu "$npm_arch" \
+              '{name:$name,version:$version,description:"pkgscope native binary",license:"MIT",repository:{type:"git",url:"git+https://github.com/pirasan023/pkgscope.git"},os:["darwin"],cpu:[$cpu],files:["bin/pkgscope","LICENSE"],publishConfig:{access:"public",provenance:true}}' \
+              > "$package_dir/package.json"
+            npm publish "$package_dir" --access public --provenance
+          done
+      - name: Publish npm launcher with provenance
+        run: npm publish ./npm --access public --provenance
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/**/*.tar.gz
+            dist/**/*.cdx.json
+            dist/SHA256SUMS
+            dist/pkgscope.rb

@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.88.0
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Lint
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Test
+        run: cargo test --all-targets
+      - name: Release build
+        run: cargo build --release --locked
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Test npm launcher
+        working-directory: npm
+        run: npm test
+      - name: Validate checked-in JSON schema
+        run: jq empty docs/schema-v1.json
+      - name: Exercise the installed Homebrew JSON interface
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          export XDG_DATA_HOME="$RUNNER_TEMP/pkgscope-data"
+          export XDG_CONFIG_HOME="$RUNNER_TEMP/pkgscope-config"
+          cargo run --locked -- --manager brew --quiet --format json scan > "$RUNNER_TEMP/brew-snapshot.json"
+          jq -e '.schema_version == 1 and (.manager_instances | map(select(.manager == "brew" and .scan_status == "success")) | length > 0)' "$RUNNER_TEMP/brew-snapshot.json"
+      - name: Verify Cargo package contents
+        run: cargo package --locked
+
+  dependency-audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.88.0
+      - uses: taiki-e/install-action@cargo-audit
+      - run: cargo audit --deny warnings

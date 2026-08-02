@@ -1,0 +1,19 @@
+[scan]
+default_environment_mode = "active"
+default_timeout = "10s"
+history = false
+project_roots = []
+
+[ui]
+default_sort = "name"
+default_order = "asc"
+color = "auto"
+language = "auto"
+
+[privacy]
+telemetry = false
+store_raw_history = false
+
+[storage]
+max_snapshots = 20
+max_age_days = 30

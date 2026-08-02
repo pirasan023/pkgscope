@@ -1,0 +1,42 @@
+[package]
+name = "pkgscope"
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Audit and safely uninstall user-installed developer tools"
+license = "MIT"
+repository = "https://github.com/pirasan023/pkgscope"
+keywords = ["cli", "packages", "audit", "macos", "tui"]
+categories = ["command-line-utilities", "development-tools"]
+
+[dependencies]
+anyhow = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.5", features = ["derive", "env"] }
+crossterm = "0.29"
+ctrlc = "3.4"
+csv = "1.3"
+dirs = "6.0"
+hex = "0.4"
+ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
+rusqlite = { version = "0.38", features = ["bundled"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+thiserror = "2.0"
+toml = "0.9"
+unicode-segmentation = "1.12"
+unicode-width = "0.2"
+uuid = { version = "1.18", features = ["v4", "serde"] }
+wait-timeout = "0.2"
+walkdir = "2.5"
+
+[dev-dependencies]
+assert_cmd = "2.0"
+predicates = "3.1"
+tempfile = "3.20"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
