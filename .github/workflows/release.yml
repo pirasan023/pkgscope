@@ -131,20 +131,34 @@ jobs:
             set -- $tuple
             target="$1"
             npm_arch="$2"
+            package_name="@pirasan023/pkgscope-darwin-${npm_arch}"
             package_dir="npm/platform-staging/darwin-${npm_arch}"
             mkdir -p "$package_dir/bin"
             tar -xzf "dist/pkgscope-${target}/pkgscope-v${version}-${target}.tar.gz" -C "$package_dir/bin"
             cp LICENSE "$package_dir/LICENSE"
             jq -n \
-              --arg name "@pirasan023/pkgscope-darwin-${npm_arch}" \
+              --arg name "$package_name" \
               --arg version "$version" \
               --arg cpu "$npm_arch" \
               '{name:$name,version:$version,description:"pkgscope native binary",license:"MIT",repository:{type:"git",url:"git+https://github.com/pirasan023/pkgscope.git"},os:["darwin"],cpu:[$cpu],files:["bin/pkgscope","LICENSE"],publishConfig:{access:"public",provenance:true}}' \
               > "$package_dir/package.json"
-            npm publish "$package_dir" --access public --provenance
+            if npm view "${package_name}@${version}" version >/dev/null 2>&1; then
+              echo "${package_name}@${version} already exists; skipping"
+            else
+              npm publish "$package_dir" --access public --provenance
+            fi
           done
       - name: Publish npm launcher with provenance
-        run: npm publish ./npm --access public --provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_name="$(jq -r .name npm/package.json)"
+          version="${{ needs.validate.outputs.version }}"
+          if npm view "${package_name}@${version}" version >/dev/null 2>&1; then
+            echo "${package_name}@${version} already exists; skipping"
+          else
+            npm publish ./npm --access public --provenance
+          fi
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
