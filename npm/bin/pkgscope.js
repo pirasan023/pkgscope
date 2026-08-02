@@ -12,20 +12,26 @@ function fail(message) {
   process.exit(1);
 }
 
-function platformPackage() {
-  if (process.platform !== 'darwin') {
-    fail(`unsupported platform ${process.platform}/${process.arch}; v0.2 supports macOS only`);
+function platformPackage(platform = process.platform, architecture = process.arch) {
+  if (!['darwin', 'linux'].includes(platform)) {
+    throw new Error(`unsupported platform ${platform}/${architecture}; v0.3 supports macOS and Linux`);
   }
-  if (process.arch === 'arm64') return '@pirasan023/pkgscope-darwin-arm64';
-  if (process.arch === 'x64') return '@pirasan023/pkgscope-darwin-x64';
-  fail(`unsupported macOS architecture ${process.arch}`);
+  if (!['arm64', 'x64'].includes(architecture)) {
+    throw new Error(`unsupported ${platform} architecture ${architecture}`);
+  }
+  return `@pirasan023/pkgscope-${platform}-${architecture}`;
 }
 
 function resolveBinary() {
   if (process.env.PKGSCOPE_BINARY_PATH) {
     return process.env.PKGSCOPE_BINARY_PATH;
   }
-  const packageName = platformPackage();
+  let packageName;
+  try {
+    packageName = platformPackage();
+  } catch (error) {
+    fail(error.message);
+  }
   let packageJson;
   try {
     packageJson = require.resolve(`${packageName}/package.json`);
@@ -45,22 +51,28 @@ function resolveBinary() {
   return path.join(path.dirname(packageJson), 'bin', 'pkgscope');
 }
 
-const binary = resolveBinary();
-if (!fs.existsSync(binary)) {
-  fail(`native binary is missing from ${binary}`);
+function main() {
+  const binary = resolveBinary();
+  if (!fs.existsSync(binary)) {
+    fail(`native binary is missing from ${binary}`);
+  }
+
+  const result = spawnSync(binary, process.argv.slice(2), {
+    stdio: 'inherit',
+    shell: false,
+    windowsHide: true
+  });
+
+  if (result.error) {
+    fail(`could not start native binary: ${result.error.message}`);
+  }
+  if (result.signal) {
+    const signalNumber = require('node:os').constants.signals[result.signal];
+    process.exit(typeof signalNumber === 'number' ? 128 + signalNumber : 1);
+  }
+  process.exit(result.status === null ? 1 : result.status);
 }
 
-const result = spawnSync(binary, process.argv.slice(2), {
-  stdio: 'inherit',
-  shell: false,
-  windowsHide: true
-});
+if (require.main === module) main();
 
-if (result.error) {
-  fail(`could not start native binary: ${result.error.message}`);
-}
-if (result.signal) {
-  const signalNumber = require('node:os').constants.signals[result.signal];
-  process.exit(typeof signalNumber === 'number' ? 128 + signalNumber : 1);
-}
-process.exit(result.status === null ? 1 : result.status);
+module.exports = { platformPackage };

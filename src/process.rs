@@ -2,7 +2,7 @@ use std::{
     collections::BTreeMap,
     io::Read,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Command, ExitStatus, Stdio},
     sync::{
         Arc, OnceLock,
         atomic::{AtomicBool, Ordering},
@@ -69,6 +69,12 @@ pub struct CommandOutput {
     pub stderr: Vec<u8>,
 }
 
+#[derive(Debug)]
+pub struct CommandAttempt {
+    pub output: CommandOutput,
+    pub status: ExitStatus,
+}
+
 impl CommandOutput {
     pub fn stdout_text(&self) -> String {
         String::from_utf8_lossy(&self.stdout).into_owned()
@@ -100,6 +106,20 @@ pub enum CommandError {
 }
 
 pub fn run(spec: &CommandSpec) -> Result<CommandOutput, CommandError> {
+    let attempt = run_allow_failure(spec)?;
+    if !attempt.status.success() {
+        return Err(CommandError::Failed {
+            status: attempt
+                .status
+                .code()
+                .map_or_else(|| "terminated by signal".into(), |code| code.to_string()),
+            stderr: redact_diagnostic(&String::from_utf8_lossy(&attempt.output.stderr)),
+        });
+    }
+    Ok(attempt.output)
+}
+
+pub fn run_allow_failure(spec: &CommandSpec) -> Result<CommandAttempt, CommandError> {
     let mut command = Command::new(&spec.executable);
     if spec.clear_env {
         command.env_clear();
@@ -168,17 +188,12 @@ pub fn run(spec: &CommandSpec) -> Result<CommandOutput, CommandError> {
     if stdout.truncated || stderr.truncated {
         return Err(CommandError::OutputLimit { limit });
     }
-    if !status.success() {
-        return Err(CommandError::Failed {
-            status: status
-                .code()
-                .map_or_else(|| "terminated by signal".into(), |c| c.to_string()),
-            stderr: redact_diagnostic(&String::from_utf8_lossy(&stderr.bytes)),
-        });
-    }
-    Ok(CommandOutput {
-        stdout: stdout.bytes,
-        stderr: stderr.bytes,
+    Ok(CommandAttempt {
+        output: CommandOutput {
+            stdout: stdout.bytes,
+            stderr: stderr.bytes,
+        },
+        status,
     })
 }
 
@@ -304,6 +319,12 @@ mod tests {
         let mut spec = CommandSpec::new("/usr/bin/yes", &[], Duration::from_secs(2));
         spec.output_limit = 1024;
         assert!(matches!(run(&spec), Err(CommandError::OutputLimit { .. })));
+    }
+
+    #[test]
+    fn commands_are_terminated_at_the_timeout() {
+        let spec = CommandSpec::new("/bin/sleep", &["2"], Duration::from_millis(10));
+        assert!(matches!(run(&spec), Err(CommandError::TimedOut(_))));
     }
 
     #[test]

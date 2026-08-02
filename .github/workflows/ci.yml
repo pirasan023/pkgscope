@@ -10,57 +10,311 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  RUST_VERSION: 1.88.0
 
 jobs:
-  test:
-    name: Test (${{ matrix.os }})
+  quality:
+    name: Quality (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-14]
+        os: [ubuntu-24.04, macos-14]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.88.0
+          toolchain: ${{ env.RUST_VERSION }}
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - name: Format
         run: cargo fmt --all -- --check
-      - name: Lint
-        run: cargo clippy --all-targets --all-features -- -D warnings
-      - name: Test
-        run: cargo test --all-targets
+      - name: Lint without warnings
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
+      - name: Rust tests, including pseudo-terminal interaction
+        run: cargo test --all-targets --locked
       - name: Release build
         run: cargo build --release --locked
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
       - name: Test npm launcher
         working-directory: npm
         run: npm test
-      - name: Validate checked-in JSON schema
-        run: jq empty docs/schema-v1.json
-      - name: Exercise the installed Homebrew JSON interface
-        if: runner.os == 'macOS'
-        shell: bash
+      - name: Validate both JSON schemas
         run: |
-          set -euo pipefail
-          export XDG_DATA_HOME="$RUNNER_TEMP/pkgscope-data"
-          export XDG_CONFIG_HOME="$RUNNER_TEMP/pkgscope-config"
-          cargo run --locked -- --manager brew --quiet --format json scan > "$RUNNER_TEMP/brew-snapshot.json"
-          jq -e '.schema_version == 1 and (.manager_instances | map(select(.manager == "brew" and .scan_status == "success")) | length > 0)' "$RUNNER_TEMP/brew-snapshot.json"
+          jq empty docs/schema-v1.json docs/schema-v2.json
+          cargo run --locked -- --quiet --format json scan > "$RUNNER_TEMP/snapshot.json" || test "$?" = 3
+          jq -e '.schema_version == 2 and .host.os != null' "$RUNNER_TEMP/snapshot.json"
+          npx --yes --package ajv-cli@5 --package ajv-formats@3 ajv validate --spec=draft2020 -c ajv-formats -s docs/schema-v2.json -d "$RUNNER_TEMP/snapshot.json"
+      - name: Exercise real Homebrew inventory on macOS
+        if: runner.os == 'macOS'
+        run: |
+          cargo run --locked -- --manager brew --quiet --format json scan > "$RUNNER_TEMP/brew.json"
+          jq -e '.schema_version == 2 and any(.manager_instances[]; .manager == "brew" and .scan_status == "success")' "$RUNNER_TEMP/brew.json"
       - name: Verify Cargo package contents
         run: cargo package --locked
 
-  dependency-audit:
-    name: Dependency audit
-    runs-on: ubuntu-latest
+  build-linux-x64:
+    name: Static Linux x64 artifact
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
+      - run: sudo apt-get update && sudo apt-get install --yes musl-tools
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.88.0
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: x86_64-unknown-linux-musl
+      - run: cargo build --release --locked --target x86_64-unknown-linux-musl
+      - name: Prove ELF architecture, static linkage, and startup
+        run: |
+          binary=target/x86_64-unknown-linux-musl/release/pkgscope
+          file "$binary" | grep -Eq 'ELF 64-bit.*x86-64'
+          if readelf -d "$binary" | grep -q NEEDED; then exit 1; fi
+          "$binary" --version | grep -Fx 'pkgscope 0.3.0'
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux-x64-ci
+          path: target/x86_64-unknown-linux-musl/release/pkgscope
+          if-no-files-found: error
+
+  os-package-managers:
+    name: ${{ matrix.name }} inventory and removal planning
+    needs: build-linux-x64
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Ubuntu apt
+            image: ubuntu:24.04
+            setup: apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install --yes jq
+            manager: apt
+            package: jq
+          - name: Debian apt
+            image: debian:bookworm
+            setup: apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install --yes jq
+            manager: apt
+            package: jq
+          - name: Fedora dnf4
+            image: fedora:40
+            setup: dnf --assumeyes install jq which dnf-plugins-core
+            manager: dnf
+            package: jq
+          - name: Fedora dnf5
+            image: fedora:latest
+            setup: dnf --assumeyes install jq which
+            manager: dnf
+            package: jq
+          - name: Arch pacman
+            image: archlinux:latest
+            setup: pacman -Syu --noconfirm --disable-sandbox jq
+            manager: pacman
+            package: jq
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v8
+        with:
+          name: linux-x64-ci
+          path: dist
+      - run: chmod +x dist/pkgscope
+      - name: Scan only explicitly installed packages and build a non-executing plan
+        env:
+          IMAGE: ${{ matrix.image }}
+          SETUP: ${{ matrix.setup }}
+          MANAGER: ${{ matrix.manager }}
+          PACKAGE: ${{ matrix.package }}
+        run: |
+          docker run --rm \
+            --volume "$PWD/dist/pkgscope:/usr/local/bin/pkgscope:ro" \
+            --env MANAGER --env PACKAGE --env SETUP \
+            "$IMAGE" sh -euxc '
+              eval "$SETUP"
+              export XDG_DATA_HOME=/tmp/pkgscope-data XDG_CONFIG_HOME=/tmp/pkgscope-config
+              pkgscope --manager "$MANAGER" --quiet --format json scan > /tmp/scan.json
+              jq -e --arg manager "$MANAGER" --arg package "$PACKAGE" \
+                '\''(.schema_version == 2) and any(.installations[]; .identity.name == $package and .intent == "explicit" and .version.value != null and .sizes.owned_apparent_bytes > 0) and any(.commands[]; .name == $package or .name == "jq") and any(.manager_instances[]; .manager == $manager and .scan_status == "success")'\'' /tmp/scan.json
+              pkgscope --manager "$MANAGER" --quiet removal-plan "$PACKAGE" > /tmp/plan.txt
+              grep -F "nothing will be executed" /tmp/plan.txt
+            '
+
+  ubuntu-tool-managers:
+    name: Ubuntu developer and Snap managers
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - name: Install disposable packages through all user-level managers
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes pipx snapd
+          npm install --global cowsay pnpm
+          pnpm setup
+          export PNPM_HOME="$HOME/.local/share/pnpm"
+          export PATH="$PNPM_HOME/bin:$PATH"
+          pnpm add --global is-number
+          pipx install cowsay
+          pipx install uv
+          pipx_home="$(pipx environment --value PIPX_HOME)"
+          "$pipx_home/venvs/uv/bin/uv" tool install pycowsay
+          fixture="$RUNNER_TEMP/cargo-fixture"
+          mkdir -p "$fixture/src"
+          printf '%s\n' '[package]' 'name="pkgscope-ci-tool"' 'version="0.1.0"' 'edition="2024"' > "$fixture/Cargo.toml"
+          printf '%s\n' 'fn main() { println!("fixture"); }' > "$fixture/src/main.rs"
+          cargo install --path "$fixture"
+          sudo systemctl start snapd.socket
+          for _ in {1..30}; do snap version >/dev/null 2>&1 && break; sleep 1; done
+          sudo snap install hello-world
+      - name: Scan npm, pnpm, pipx, uv, Cargo, and Snap from local inventory
+        run: |
+          export PNPM_HOME="$HOME/.local/share/pnpm"
+          pipx_home="$(pipx environment --value PIPX_HOME)"
+          export PATH="$pipx_home/venvs/uv/bin:$PNPM_HOME/bin:$HOME/.local/bin:$PATH"
+          cargo run --locked -- --quiet --format json \
+            --manager npm --manager pnpm --manager pipx --manager uv --manager cargo --manager snap \
+            scan > "$RUNNER_TEMP/tools.json"
+          jq -e '
+            .schema_version == 2 and
+            ([.manager_instances[].manager] | contains(["npm", "pnpm", "pipx", "uv", "cargo", "snap"])) and
+            any(.installations[]; .identity.name == "pkgscope-ci-tool") and
+            any(.installations[]; .identity.name == "hello-world")
+          ' "$RUNNER_TEMP/tools.json"
+
+  flatpak-installations:
+    name: Flatpak user, system, and named-system installations
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install --yes flatpak ostree
+      - name: Build a local repository and install every Flatpak scope
+        run: |
+          repo="$RUNNER_TEMP/flatpak-repo"
+          build="$RUNNER_TEMP/flatpak-build"
+          mkdir -p "$repo" "$build/files/bin"
+          printf '#!/bin/sh\nexit 0\n' > "$build/files/bin/demo"
+          chmod +x "$build/files/bin/demo"
+          printf '%s\n' '[Application]' 'name=org.pkgscope.Demo' 'runtime=org.freedesktop.Platform/x86_64/23.08' 'sdk=org.freedesktop.Sdk/x86_64/23.08' 'command=demo' > "$build/metadata"
+          flatpak build-finish "$build" --command=demo
+          flatpak build-export "$repo" "$build" stable
+          flatpak remote-add --user --no-gpg-verify local-user "file://$repo"
+          flatpak install --user --no-deps --noninteractive local-user org.pkgscope.Demo
+          sudo flatpak remote-add --system --no-gpg-verify local-system "file://$repo"
+          sudo flatpak install --system --no-deps --noninteractive local-system org.pkgscope.Demo
+          sudo mkdir -p /etc/flatpak/installations.d
+          printf '[Installation "extra"]\nPath=%s\nDisplayName=Extra\nStorageType=harddisk\n' "$RUNNER_TEMP/flatpak-extra" | sudo tee /etc/flatpak/installations.d/extra.conf
+          sudo flatpak remote-add --installation=extra --no-gpg-verify local-extra "file://$repo"
+          sudo flatpak install --installation=extra --no-deps --noninteractive local-extra org.pkgscope.Demo
+      - name: Verify scope separation
+        run: |
+          cargo run --locked -- --quiet --format json --manager flatpak scan > "$RUNNER_TEMP/flatpak.json"
+          jq -e '([.installations[] | select(.identity.name == "org.pkgscope.Demo") | .environment] | sort) == ["system", "system:extra", "user"]' "$RUNNER_TEMP/flatpak.json"
+
+  alpine-npm:
+    name: Alpine static binary and npm installation
+    needs: build-linux-x64
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v8
+        with:
+          name: linux-x64-ci
+          path: dist
+      - run: chmod +x dist/pkgscope
+      - name: Install the local launcher exactly as a global npm package
+        run: |
+          docker run --rm --volume "$PWD:/work:ro" alpine:latest sh -euxc '
+            apk add --no-cache nodejs npm jq file
+            file /work/dist/pkgscope | grep -E "ELF 64-bit.*x86-64"
+            /work/dist/pkgscope --version | grep -Fx "pkgscope 0.3.0"
+            platform=/tmp/platform launcher=/tmp/launcher packages=/tmp/packages prefix=/tmp/npm-prefix
+            mkdir -p "$platform/bin" "$launcher" "$packages"
+            cp /work/dist/pkgscope "$platform/bin/pkgscope"
+            jq -n '\''{name:"@pirasan023/pkgscope-linux-x64",version:"0.3.0",os:["linux"],cpu:["x64"],files:["bin/pkgscope"]}'\'' > "$platform/package.json"
+            platform_tgz=$(npm pack "$platform" --pack-destination "$packages" --silent)
+            cp -R /work/npm/bin /work/npm/README.md /work/npm/LICENSE "$launcher/"
+            jq --arg dep "file:$packages/$platform_tgz" '\''.optionalDependencies = {"@pirasan023/pkgscope-linux-x64": $dep}'\'' /work/npm/package.json > "$launcher/package.json"
+            launcher_tgz=$(npm pack "$launcher" --pack-destination "$packages" --silent)
+            npm install --global --prefix "$prefix" "$packages/$launcher_tgz"
+            "$prefix/bin/pkgscope" --version | grep -Fx "pkgscope 0.3.0"
+            XDG_DATA_HOME=/tmp/data "$prefix/bin/pkgscope" --quiet --format json scan > /tmp/scan.json
+            jq -e '\''.schema_version == 2 and .host.linux_distribution.id == "alpine"'\'' /tmp/scan.json
+          '
+
+  linuxbrew:
+    name: Official Linuxbrew environment
+    needs: build-linux-x64
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: linux-x64-ci
+          path: dist
+      - run: chmod +x dist/pkgscope
+      - name: Discover the standard Linuxbrew prefix offline
+        run: |
+          docker run --rm --entrypoint /bin/bash --volume "$PWD/dist/pkgscope:/tmp/pkgscope:ro" homebrew/brew \
+            -lc 'XDG_DATA_HOME=/tmp/data /tmp/pkgscope --quiet --format json --manager brew scan' > "$RUNNER_TEMP/linuxbrew.json"
+          jq -e 'any(.manager_instances[]; .manager == "brew" and .scan_status == "success" and (.executable_path | startswith("/home/linuxbrew/.linuxbrew/")))' "$RUNNER_TEMP/linuxbrew.json"
+
+  linux-arm64:
+    name: Native static Linux ARM64 and npm launcher
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v6
+      - run: sudo apt-get update && sudo apt-get install --yes musl-tools
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: aarch64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: aarch64-unknown-linux-musl
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - run: cargo build --release --locked --target aarch64-unknown-linux-musl
+      - name: Prove architecture, static linkage, startup, and local npm selection
+        run: |
+          set -euo pipefail
+          binary="$PWD/target/aarch64-unknown-linux-musl/release/pkgscope"
+          file "$binary" | grep -Eq 'ELF 64-bit.*ARM aarch64'
+          if readelf -d "$binary" | grep -q NEEDED; then exit 1; fi
+          "$binary" --version | grep -Fx 'pkgscope 0.3.0'
+          platform="$RUNNER_TEMP/platform"
+          launcher="$RUNNER_TEMP/launcher"
+          packages="$RUNNER_TEMP/packages"
+          prefix="$RUNNER_TEMP/npm-prefix"
+          mkdir -p "$platform/bin" "$launcher" "$packages"
+          cp "$binary" "$platform/bin/pkgscope"
+          jq -n '{name:"@pirasan023/pkgscope-linux-arm64",version:"0.3.0",os:["linux"],cpu:["arm64"],bin:{},files:["bin/pkgscope"]}' > "$platform/package.json"
+          platform_tgz="$(npm pack "$platform" --pack-destination "$packages" --silent)"
+          cp -R npm/bin npm/README.md npm/LICENSE "$launcher/"
+          jq --arg dep "file:$packages/$platform_tgz" '.optionalDependencies = {"@pirasan023/pkgscope-linux-arm64": $dep}' npm/package.json > "$launcher/package.json"
+          launcher_tgz="$(npm pack "$launcher" --pack-destination "$packages" --silent)"
+          npm install --global --prefix "$prefix" "$packages/$launcher_tgz"
+          "$prefix/bin/pkgscope" --version | grep -Fx 'pkgscope 0.3.0'
+          "$prefix/bin/pkgscope" --quiet doctor
+
+  dependency-audit:
+    name: Dependency audit
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
       - uses: taiki-e/install-action@cargo-audit
       - run: cargo audit --deny warnings

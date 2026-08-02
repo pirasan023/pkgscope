@@ -1,10 +1,10 @@
-use std::{path::Path, time::Duration};
+use std::{collections::BTreeSet, path::Path, time::Duration};
 
 use anyhow::{Context, Result, bail};
 
 use crate::{
     cli::build_removal_plan,
-    model::{InstallationRecord, ManagerInstance, RemovalPlan, ScanStatus, Snapshot},
+    model::{InstallationRecord, ManagerInstance, ManagerKind, RemovalPlan, ScanStatus, Snapshot},
     process::{self, CommandOutput},
     scanner::{self, ScanOptions},
 };
@@ -83,6 +83,8 @@ fn revalidate_with_executable(
     {
         bail!("pkgscope refuses to remove the runtime needed for this action");
     }
+    require_privileges(record, &fresh_plan)?;
+    verify_system_removal_transaction(instance, record, &fresh_plan)?;
 
     Ok(VerifiedRemoval {
         plan: fresh_plan,
@@ -119,6 +121,16 @@ fn same_path(left: &Path, right: &Path) -> bool {
 }
 
 pub(crate) fn execute(verified: &VerifiedRemoval, options: &ScanOptions) -> Result<CommandOutput> {
+    let record_requires_root = verified
+        .plan
+        .preconditions
+        .iter()
+        .any(|precondition| precondition == "already_running_with_root_privileges");
+    if record_requires_root && !has_root_privileges() {
+        bail!(
+            "root privileges are required; pkgscope never starts sudo automatically. Run the displayed command from an already-authorized root session"
+        );
+    }
     let args = verified
         .plan
         .action
@@ -131,6 +143,252 @@ pub(crate) fn execute(verified: &VerifiedRemoval, options: &ScanOptions) -> Resu
     spec.cwd = verified.plan.action.cwd.as_deref().map(Into::into);
     spec.env.extend(verified.plan.action.env_overrides.clone());
     process::run(&spec).map_err(Into::into)
+}
+
+fn require_privileges(record: &InstallationRecord, plan: &RemovalPlan) -> Result<()> {
+    let requires_root = record
+        .metadata
+        .get("requires_root")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    if !requires_root || has_root_privileges() {
+        return Ok(());
+    }
+    let reason = record
+        .metadata
+        .get("privilege_reason")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("the selected package is in a system installation");
+    let command = std::iter::once(plan.action.executable.as_str())
+        .chain(plan.action.argv.iter().map(String::as_str))
+        .collect::<Vec<_>>()
+        .join(" ");
+    bail!(
+        "root privileges are required because {reason}; pkgscope never starts sudo automatically. Nothing was executed. Command: {command}"
+    )
+}
+
+fn has_root_privileges() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        let Ok(status) = std::fs::read_to_string("/proc/self/status") else {
+            return false;
+        };
+        status.lines().find_map(|line| {
+            let values = line.strip_prefix("Uid:")?;
+            values
+                .split_whitespace()
+                .nth(1)
+                .and_then(|effective| effective.parse::<u32>().ok())
+        }) == Some(0)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
+}
+
+fn verify_system_removal_transaction(
+    instance: &ManagerInstance,
+    record: &InstallationRecord,
+    plan: &RemovalPlan,
+) -> Result<()> {
+    match instance.manager {
+        ManagerKind::Apt => verify_apt_transaction(instance, record),
+        ManagerKind::Dnf => verify_dnf_transaction(instance, record),
+        ManagerKind::Pacman => verify_pacman_transaction(instance, record),
+        _ => Ok(()),
+    }
+    .with_context(|| {
+        format!(
+            "the removal transaction could not be proven to contain only {}; nothing was executed (planned command: {} {})",
+            record.identity.name,
+            plan.action.executable,
+            plan.action.argv.join(" ")
+        )
+    })
+}
+
+fn verification_options() -> ScanOptions {
+    ScanOptions {
+        timeout: Duration::from_secs(60),
+        offline: true,
+        ..ScanOptions::default()
+    }
+}
+
+fn verify_apt_transaction(instance: &ManagerInstance, record: &InstallationRecord) -> Result<()> {
+    let options = verification_options();
+    let dpkg = scanner::companion_executable(instance, &["dpkg"])
+        .context("dpkg was not found beside apt-get or on PATH")?;
+    let mut dpkg_instance = instance.clone();
+    dpkg_instance.executable_path = dpkg.display().to_string();
+    let mut dpkg_spec = scanner::manager_command_spec(
+        &dpkg_instance,
+        &["--dry-run", "--remove", "--", &record.identity.name],
+        &options,
+    );
+    dpkg_spec.timeout = Duration::from_secs(60);
+    process::run(&dpkg_spec).context("dpkg dependency check refused the target")?;
+
+    let args = [
+        "--simulate",
+        "--no-auto-remove",
+        "remove",
+        "--",
+        &record.identity.name,
+    ];
+    let spec = scanner::manager_command_spec(instance, &args, &options);
+    let output = process::run(&spec).context("APT removal simulation failed")?;
+    let text = format!("{}\n{}", output.stdout_text(), output.stderr_text());
+    let changes = parse_apt_changes(&text);
+    require_only_target(changes.removed, &record.identity.name)?;
+    if !changes.installed.is_empty() {
+        bail!(
+            "APT simulation would also install or configure: {}",
+            changes.installed.into_iter().collect::<Vec<_>>().join(", ")
+        );
+    }
+    Ok(())
+}
+
+fn verify_dnf_transaction(instance: &ManagerInstance, record: &InstallationRecord) -> Result<()> {
+    let options = verification_options();
+    let package_spec = record
+        .metadata
+        .get("rpm_name_arch")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(&record.identity.name);
+    let rpm = scanner::companion_executable(instance, &["rpm"])
+        .context("rpm was not found beside dnf or on PATH")?;
+    let mut rpm_instance = instance.clone();
+    rpm_instance.executable_path = rpm.display().to_string();
+    let rpm_spec = scanner::manager_command_spec(
+        &rpm_instance,
+        &["--erase", "--test", "--", package_spec],
+        &options,
+    );
+    process::run(&rpm_spec).context("RPM dependency check refused the target")?;
+
+    let args = [
+        "--assumeno",
+        "--setopt=clean_requirements_on_remove=False",
+        "remove",
+        package_spec,
+    ];
+    let spec = scanner::manager_command_spec(instance, &args, &options);
+    let attempt = process::run_allow_failure(&spec).context("DNF removal simulation failed")?;
+    let text = format!(
+        "{}\n{}",
+        attempt.output.stdout_text(),
+        attempt.output.stderr_text()
+    );
+    let removed = parse_dnf_removals(&text);
+    require_only_target(removed, &record.identity.name)
+}
+
+fn verify_pacman_transaction(
+    instance: &ManagerInstance,
+    record: &InstallationRecord,
+) -> Result<()> {
+    let options = verification_options();
+    let args = [
+        "-R",
+        "--print",
+        "--print-format",
+        "%n",
+        "--",
+        &record.identity.name,
+    ];
+    let spec = scanner::manager_command_spec(instance, &args, &options);
+    let output = process::run(&spec).context("pacman removal simulation failed")?;
+    let removed = output
+        .stdout_text()
+        .lines()
+        .map(crate::sanitize::terminal_text)
+        .filter(|name| !name.is_empty())
+        .collect();
+    require_only_target(removed, &record.identity.name)
+}
+
+#[derive(Default)]
+struct AptChanges {
+    removed: BTreeSet<String>,
+    installed: BTreeSet<String>,
+}
+
+fn parse_apt_changes(output: &str) -> AptChanges {
+    let mut changes = AptChanges::default();
+    for line in output.lines() {
+        let mut fields = line.split_whitespace();
+        let Some(operation) = fields.next() else {
+            continue;
+        };
+        let Some(package) = fields.next() else {
+            continue;
+        };
+        match operation {
+            "Remv" | "Purg" => {
+                changes.removed.insert(package.to_string());
+            }
+            "Inst" | "Conf" => {
+                changes.installed.insert(package.to_string());
+            }
+            _ => {}
+        }
+    }
+    changes
+}
+
+fn parse_dnf_removals(output: &str) -> BTreeSet<String> {
+    let mut removed = BTreeSet::new();
+    let mut in_removal_section = false;
+    for line in output.lines() {
+        let trimmed = line.trim();
+        let lower = trimmed.to_ascii_lowercase();
+        if (lower.starts_with("removing") || lower.starts_with("erasing")) && lower.ends_with(':') {
+            in_removal_section = true;
+            continue;
+        }
+        if lower.starts_with("transaction summary")
+            || lower.starts_with("after this operation")
+            || lower.starts_with("operation aborted")
+        {
+            in_removal_section = false;
+            continue;
+        }
+        if !in_removal_section
+            || trimmed.is_empty()
+            || trimmed.starts_with('=')
+            || trimmed.starts_with('-')
+        {
+            continue;
+        }
+        let Some(name) = trimmed.split_whitespace().next() else {
+            continue;
+        };
+        if !matches!(
+            name.to_ascii_lowercase().as_str(),
+            "package" | "architecture"
+        ) {
+            removed.insert(crate::sanitize::terminal_text(name));
+        }
+    }
+    removed
+}
+
+fn require_only_target(mut removed: BTreeSet<String>, target: &str) -> Result<()> {
+    let target_base = target.split(':').next().unwrap_or(target);
+    let matches_target = removed.remove(target) || removed.remove(target_base);
+    if !matches_target || !removed.is_empty() {
+        let reported = if removed.is_empty() {
+            "no exact target-only transaction".into()
+        } else {
+            removed.into_iter().collect::<Vec<_>>().join(", ")
+        };
+        bail!("transaction reported additional or missing removals: {reported}");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -210,6 +468,207 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(error.contains("managed dependents"));
+    }
+
+    #[test]
+    fn apt_transaction_parser_rejects_additional_changes() {
+        let exact = parse_apt_changes("Remv demo [1.0]\n");
+        assert!(require_only_target(exact.removed, "demo").is_ok());
+
+        let extra = parse_apt_changes("Remv demo [1.0]\nRemv libc6 [2.0]\n");
+        assert!(require_only_target(extra.removed, "demo").is_err());
+
+        let install = parse_apt_changes("Remv demo [1.0]\nInst replacement (2.0 repo)\n");
+        assert_eq!(install.installed, BTreeSet::from(["replacement".into()]));
+    }
+
+    #[test]
+    fn dnf_transaction_parser_includes_unused_dependencies() {
+        let output = "Removing:\n demo x86_64 1.0 installed 1 M\nRemoving unused dependencies:\n helper x86_64 1.0 installed 1 M\nTransaction Summary\n";
+        let removed = parse_dnf_removals(output);
+        assert_eq!(removed, BTreeSet::from(["demo".into(), "helper".into()]));
+        assert!(require_only_target(removed, "demo").is_err());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn all_eleven_managers_revalidate_and_execute_the_exact_direct_argv() {
+        let cases = [
+            (
+                ManagerKind::Brew,
+                "brew",
+                SourceKind::Formula,
+                "uninstall\ndemo\n",
+            ),
+            (
+                ManagerKind::Npm,
+                "npm",
+                SourceKind::Registry,
+                "uninstall\n-g\ndemo\n",
+            ),
+            (
+                ManagerKind::Pnpm,
+                "pnpm",
+                SourceKind::Registry,
+                "remove\n-g\ndemo\n",
+            ),
+            (
+                ManagerKind::Pipx,
+                "pipx",
+                SourceKind::Registry,
+                "uninstall\ndemo\n",
+            ),
+            (
+                ManagerKind::Uv,
+                "uv",
+                SourceKind::Registry,
+                "tool\nuninstall\ndemo\n",
+            ),
+            (
+                ManagerKind::Cargo,
+                "cargo",
+                SourceKind::Registry,
+                "uninstall\ndemo\n",
+            ),
+            (
+                ManagerKind::Apt,
+                "apt-get",
+                SourceKind::Deb,
+                "--assume-yes\n--no-auto-remove\nremove\n--\ndemo\n",
+            ),
+            (
+                ManagerKind::Dnf,
+                "dnf5",
+                SourceKind::Rpm,
+                "--assumeyes\n--setopt=clean_requirements_on_remove=False\nremove\ndemo.x86_64\n",
+            ),
+            (
+                ManagerKind::Pacman,
+                "pacman",
+                SourceKind::Pacman,
+                "-R\n--noconfirm\n--\ndemo\n",
+            ),
+            (
+                ManagerKind::Snap,
+                "snap",
+                SourceKind::Snap,
+                "remove\ndemo\n",
+            ),
+            (
+                ManagerKind::Flatpak,
+                "flatpak",
+                SourceKind::Flatpak,
+                "--user\nuninstall\n--noninteractive\n--no-related\napp/demo/x86_64/stable\n",
+            ),
+        ];
+
+        for (manager, executable_name, source_kind, expected_argv) in cases {
+            let temp = tempfile::tempdir().unwrap();
+            let marker = temp.path().join("args.txt");
+            let manager_path = temp.path().join(executable_name);
+            let manager_script = match manager {
+                ManagerKind::Apt => format!(
+                    "#!/bin/sh\nif [ \"$1\" = --simulate ]; then printf 'Remv demo [1.0]\\n'; else printf '%s\\n' \"$@\" > '{}'; fi\n",
+                    marker.display()
+                ),
+                ManagerKind::Dnf => format!(
+                    "#!/bin/sh\nif [ \"$1\" = --assumeno ]; then printf 'Removing:\\n demo x86_64 1.0 installed 1 M\\nTransaction Summary\\n'; exit 1; else printf '%s\\n' \"$@\" > '{}'; fi\n",
+                    marker.display()
+                ),
+                ManagerKind::Pacman => format!(
+                    "#!/bin/sh\nif [ \"$#\" -eq 6 ] && [ \"$1\" = -R ] && [ \"$2\" = --print ] && [ \"$3\" = --print-format ] && [ \"$4\" = %n ] && [ \"$5\" = -- ] && [ \"$6\" = demo ]; then printf 'demo\\n'; elif [ \"$1\" = -R ] && [ \"$2\" = --noconfirm ]; then printf '%s\\n' \"$@\" > '{}'; else exit 64; fi\n",
+                    marker.display()
+                ),
+                _ => format!(
+                    "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
+                    marker.display()
+                ),
+            };
+            executable(&manager_path, &manager_script);
+            if manager == ManagerKind::Apt {
+                executable(&temp.path().join("dpkg"), "#!/bin/sh\nexit 0\n");
+            }
+            if manager == ManagerKind::Dnf {
+                executable(&temp.path().join("rpm"), "#!/bin/sh\nexit 0\n");
+            }
+            let bin = temp.path().join("bin/demo");
+            executable(&bin, "#!/bin/sh\nexit 0\n");
+            let (mut snapshot, mut record) = fixture(&manager_path, &bin);
+            let instance = &mut snapshot.manager_instances[0];
+            instance.manager = manager;
+            instance.id = "manager-instance".into();
+            instance.root = Some(temp.path().join("root").display().to_string());
+            record.manager_instance_id = instance.id.clone();
+            record.identity.ecosystem = manager.to_string();
+            record.identity.source_kind = source_kind;
+            if manager == ManagerKind::Dnf {
+                record
+                    .metadata
+                    .insert("rpm_name_arch".into(), "demo.x86_64".into());
+            }
+            if manager == ManagerKind::Flatpak {
+                record
+                    .metadata
+                    .insert("flatpak_installation".into(), "user".into());
+                record
+                    .metadata
+                    .insert("flatpak_ref".into(), "app/demo/x86_64/stable".into());
+            }
+            snapshot.installations = vec![record.clone()];
+            let plan = build_removal_plan(&snapshot, &record).unwrap();
+            let verified = revalidate_with_executable(
+                &record,
+                &plan,
+                &snapshot,
+                &temp.path().join("other-pkgscope"),
+            )
+            .unwrap_or_else(|error| panic!("{manager} revalidation failed: {error:#}"));
+            execute(&verified, &ScanOptions::default())
+                .unwrap_or_else(|error| panic!("{manager} execution failed: {error:#}"));
+            assert_eq!(
+                fs::read_to_string(&marker).unwrap(),
+                expected_argv,
+                "wrong argv for {manager}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn root_required_records_are_refused_without_starting_sudo_or_the_manager() {
+        if has_root_privileges() {
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let marker = temp.path().join("executed");
+        let manager_path = temp.path().join("apt-get");
+        executable(
+            &manager_path,
+            &format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+        );
+        let bin = temp.path().join("bin/demo");
+        executable(&bin, "#!/bin/sh\nexit 0\n");
+        let (mut snapshot, mut record) = fixture(&manager_path, &bin);
+        snapshot.manager_instances[0].manager = ManagerKind::Apt;
+        record.identity.source_kind = SourceKind::Deb;
+        record.metadata.insert("requires_root".into(), true.into());
+        record.metadata.insert(
+            "privilege_reason".into(),
+            "APT modifies the system database".into(),
+        );
+        snapshot.installations = vec![record.clone()];
+        let plan = build_removal_plan(&snapshot, &record).unwrap();
+        let error = revalidate_with_executable(
+            &record,
+            &plan,
+            &snapshot,
+            &temp.path().join("other-pkgscope"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("never starts sudo"));
+        assert!(error.contains("apt-get"));
+        assert!(!marker.exists());
     }
 
     fn fixture(manager_path: &Path, bin: &Path) -> (Snapshot, InstallationRecord) {

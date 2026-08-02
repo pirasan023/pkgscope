@@ -8,6 +8,15 @@ const { spawnSync } = require('node:child_process');
 const test = require('node:test');
 
 const launcher = path.resolve(__dirname, '../bin/pkgscope.js');
+const { platformPackage } = require('../bin/pkgscope.js');
+
+test('selects exact macOS and Linux architecture packages', () => {
+  assert.equal(platformPackage('darwin', 'arm64'), '@pirasan023/pkgscope-darwin-arm64');
+  assert.equal(platformPackage('darwin', 'x64'), '@pirasan023/pkgscope-darwin-x64');
+  assert.equal(platformPackage('linux', 'arm64'), '@pirasan023/pkgscope-linux-arm64');
+  assert.equal(platformPackage('linux', 'x64'), '@pirasan023/pkgscope-linux-x64');
+  assert.throws(() => platformPackage('win32', 'x64'), /unsupported platform/);
+});
 
 test('forwards argv without shell evaluation and preserves exit status', () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'pkgscope-launcher-'));
@@ -35,4 +44,3 @@ test('reports a missing explicit binary without a stack trace', () => {
   assert.match(result.stderr, /^pkgscope: native binary is missing/);
   assert.doesNotMatch(result.stderr, /at Object\./);
 });
-

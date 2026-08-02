@@ -1,12 +1,12 @@
 [package]
 name = "pkgscope"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Audit and safely uninstall user-installed developer tools"
 license = "MIT"
 repository = "https://github.com/pirasan023/pkgscope"
-keywords = ["cli", "packages", "audit", "macos", "tui"]
+keywords = ["cli", "packages", "audit", "linux", "tui"]
 categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
@@ -22,6 +22,7 @@ ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
 rusqlite = { version = "0.38", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+serde_yaml_ng = "0.10"
 sha2 = "0.10"
 thiserror = "2.0"
 toml = "0.9"
@@ -34,6 +35,7 @@ walkdir = "2.5"
 [dev-dependencies]
 assert_cmd = "2.0"
 predicates = "3.1"
+portable-pty = "0.9"
 tempfile = "3.20"
 
 [profile.release]

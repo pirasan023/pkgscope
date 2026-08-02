@@ -1,6 +1,6 @@
 {
   "name": "@pirasan023/pkgscope",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Inspect and uninstall developer tools from one terminal UI",
   "license": "MIT",
   "repository": {
@@ -25,11 +25,14 @@
     "node": ">=18"
   },
   "os": [
-    "darwin"
+    "darwin",
+    "linux"
   ],
   "optionalDependencies": {
-    "@pirasan023/pkgscope-darwin-arm64": "0.2.0",
-    "@pirasan023/pkgscope-darwin-x64": "0.2.0"
+    "@pirasan023/pkgscope-darwin-arm64": "0.3.0",
+    "@pirasan023/pkgscope-darwin-x64": "0.3.0",
+    "@pirasan023/pkgscope-linux-arm64": "0.3.0",
+    "@pirasan023/pkgscope-linux-x64": "0.3.0"
   },
   "publishConfig": {
     "access": "public",

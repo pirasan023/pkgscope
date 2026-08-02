@@ -14,10 +14,11 @@ Run the complete local gate:
 
 ```console
 cargo fmt --all -- --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-targets
-cargo build --release
-node --test npm/test/launcher.test.js
+cargo clippy --all-targets --all-features --locked -- -D warnings
+cargo test --all-targets --locked
+cargo build --release --locked
+cargo audit --deny warnings
+npm test --prefix npm
 ```
 
 Parser changes should include a minimal fixture covering the relevant manager version and malformed/unknown-field cases. Security fixes should include a regression test where practical.
