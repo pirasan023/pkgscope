@@ -292,7 +292,14 @@ fn verify_pacman_transaction(
     record: &InstallationRecord,
 ) -> Result<()> {
     let options = verification_options();
-    let args = ["-R", "--print-format", "%n", "--", &record.identity.name];
+    let args = [
+        "-R",
+        "--print",
+        "--print-format",
+        "%n",
+        "--",
+        &record.identity.name,
+    ];
     let spec = scanner::manager_command_spec(instance, &args, &options);
     let output = process::run(&spec).context("pacman removal simulation failed")?;
     let removed = output
@@ -569,7 +576,7 @@ mod tests {
                     marker.display()
                 ),
                 ManagerKind::Pacman => format!(
-                    "#!/bin/sh\nif [ \"$2\" = --print-format ]; then printf 'demo\\n'; else printf '%s\\n' \"$@\" > '{}'; fi\n",
+                    "#!/bin/sh\nif [ \"$#\" -eq 6 ] && [ \"$1\" = -R ] && [ \"$2\" = --print ] && [ \"$3\" = --print-format ] && [ \"$4\" = %n ] && [ \"$5\" = -- ] && [ \"$6\" = demo ]; then printf 'demo\\n'; elif [ \"$1\" = -R ] && [ \"$2\" = --noconfirm ]; then printf '%s\\n' \"$@\" > '{}'; else exit 64; fi\n",
                     marker.display()
                 ),
                 _ => format!(
