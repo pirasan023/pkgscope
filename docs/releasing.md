@@ -6,7 +6,7 @@ Public release is intentionally gated because `pkgscope` is a working title and 
 
 Before the first public release, record evidence that the intended npm scope/name, GitHub repository name, search identity, and relevant trademarks have been reviewed. Configure a protected GitHub `release` environment requiring approval. No paid Apple Developer account or Apple signing secret is used.
 
-npm publishing uses trusted publishing/OIDC and must not use a long-lived npm token. Register this repository and the release workflow as trusted publishers for `pkgscope`, `@pirasan023/pkgscope-darwin-arm64`, and `@pirasan023/pkgscope-darwin-x64` before enabling the publish job.
+npm publishing uses trusted publishing/OIDC and must not use a long-lived npm token. Register this repository and the release workflow as trusted publishers for `@pirasan023/pkgscope`, `@pirasan023/pkgscope-darwin-arm64`, and `@pirasan023/pkgscope-darwin-x64` before enabling the publish job.
 
 ## Per release
 

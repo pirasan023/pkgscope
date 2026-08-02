@@ -35,6 +35,15 @@ This repository contains the v0.2 pre-release implementation. Public release bin
 
 Requirements: Rust 1.88 or newer. macOS 14+ on Apple Silicon is the primary target; Intel/Rosetta manager instances are detected separately.
 
+Install the published npm package:
+
+```console
+npm install --global @pirasan023/pkgscope
+pkgscope
+```
+
+Or build from source:
+
 ```console
 cargo build --release
 ./target/release/pkgscope doctor
