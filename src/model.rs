@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Snapshot {
@@ -43,16 +43,34 @@ pub struct HostInfo {
     pub os: String,
     pub os_version: Option<String>,
     pub architecture: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linux_distribution: Option<LinuxDistribution>,
 }
 
 impl HostInfo {
     fn current() -> Self {
+        let linux_distribution = linux_distribution();
         Self {
             os: std::env::consts::OS.to_string(),
-            os_version: macos_version(),
+            os_version: macos_version().or_else(|| {
+                linux_distribution
+                    .as_ref()
+                    .and_then(|distribution| distribution.version_id.clone())
+            }),
             architecture: platform_architecture().to_string(),
+            linux_distribution,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LinuxDistribution {
+    pub id: Option<String>,
+    pub name: Option<String>,
+    pub pretty_name: Option<String>,
+    pub version_id: Option<String>,
+    pub version_codename: Option<String>,
+    pub id_like: Vec<String>,
 }
 
 pub fn platform_architecture() -> &'static str {
@@ -72,6 +90,75 @@ fn macos_version() -> Option<String> {
         .ok()
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+}
+
+fn linux_distribution() -> Option<LinuxDistribution> {
+    if std::env::consts::OS != "linux" {
+        return None;
+    }
+    let contents = std::fs::read_to_string("/etc/os-release")
+        .or_else(|_| std::fs::read_to_string("/usr/lib/os-release"))
+        .ok()?;
+    parse_os_release(&contents)
+}
+
+fn parse_os_release(contents: &str) -> Option<LinuxDistribution> {
+    let mut values = BTreeMap::new();
+    for line in contents.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, raw_value)) = line.split_once('=') else {
+            continue;
+        };
+        if !key.chars().all(|character| {
+            character.is_ascii_uppercase() || character.is_ascii_digit() || character == '_'
+        }) {
+            continue;
+        }
+        let value = unquote_os_release(raw_value.trim());
+        values.insert(key.to_string(), crate::sanitize::terminal_text(&value));
+    }
+    let get = |key: &str| values.get(key).filter(|value| !value.is_empty()).cloned();
+    let distribution = LinuxDistribution {
+        id: get("ID"),
+        name: get("NAME"),
+        pretty_name: get("PRETTY_NAME"),
+        version_id: get("VERSION_ID"),
+        version_codename: get("VERSION_CODENAME"),
+        id_like: get("ID_LIKE")
+            .map(|value| value.split_whitespace().map(str::to_string).collect())
+            .unwrap_or_default(),
+    };
+    (distribution.id.is_some() || distribution.name.is_some() || distribution.pretty_name.is_some())
+        .then_some(distribution)
+}
+
+fn unquote_os_release(value: &str) -> String {
+    let quoted = (value.starts_with('"') && value.ends_with('"'))
+        || (value.starts_with('\'') && value.ends_with('\''));
+    let value = if quoted && value.len() >= 2 {
+        &value[1..value.len() - 1]
+    } else {
+        value
+    };
+    let mut result = String::with_capacity(value.len());
+    let mut escaped = false;
+    for character in value.chars() {
+        if escaped {
+            result.push(character);
+            escaped = false;
+        } else if character == '\\' {
+            escaped = true;
+        } else {
+            result.push(character);
+        }
+    }
+    if escaped {
+        result.push('\\');
+    }
+    result
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -112,16 +199,26 @@ pub enum ManagerKind {
     Pipx,
     Uv,
     Cargo,
+    Apt,
+    Dnf,
+    Pacman,
+    Snap,
+    Flatpak,
 }
 
 impl ManagerKind {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 11] = [
         Self::Brew,
         Self::Npm,
         Self::Pnpm,
         Self::Pipx,
         Self::Uv,
         Self::Cargo,
+        Self::Apt,
+        Self::Dnf,
+        Self::Pacman,
+        Self::Snap,
+        Self::Flatpak,
     ];
 
     pub fn executable(self) -> &'static str {
@@ -132,6 +229,30 @@ impl ManagerKind {
             Self::Pipx => "pipx",
             Self::Uv => "uv",
             Self::Cargo => "cargo",
+            Self::Apt => "apt-get",
+            Self::Dnf => "dnf",
+            Self::Pacman => "pacman",
+            Self::Snap => "snap",
+            Self::Flatpak => "flatpak",
+        }
+    }
+
+    pub fn executable_names(self) -> &'static [&'static str] {
+        match self {
+            Self::Dnf => &["dnf5", "dnf", "dnf4", "dnf-3"],
+            _ => match self {
+                Self::Brew => &["brew"],
+                Self::Npm => &["npm"],
+                Self::Pnpm => &["pnpm"],
+                Self::Pipx => &["pipx"],
+                Self::Uv => &["uv"],
+                Self::Cargo => &["cargo"],
+                Self::Apt => &["apt-get"],
+                Self::Pacman => &["pacman"],
+                Self::Snap => &["snap"],
+                Self::Flatpak => &["flatpak"],
+                Self::Dnf => unreachable!(),
+            },
         }
     }
 }
@@ -153,6 +274,11 @@ impl std::str::FromStr for ManagerKind {
             "pipx" => Ok(Self::Pipx),
             "uv" => Ok(Self::Uv),
             "cargo" | "rust" => Ok(Self::Cargo),
+            "apt" | "apt-get" | "dpkg" => Ok(Self::Apt),
+            "dnf" | "dnf4" | "dnf5" => Ok(Self::Dnf),
+            "pacman" => Ok(Self::Pacman),
+            "snap" | "snapd" => Ok(Self::Snap),
+            "flatpak" => Ok(Self::Flatpak),
             _ => Err(format!("unsupported manager: {value}")),
         }
     }
@@ -232,6 +358,11 @@ pub enum SourceKind {
     Formula,
     Cask,
     Linked,
+    Deb,
+    Rpm,
+    Pacman,
+    Snap,
+    Flatpak,
     Unknown,
 }
 
@@ -446,4 +577,45 @@ pub fn stable_id(parts: &[&str]) -> String {
         hasher.update(part.as_bytes());
     }
     hex::encode(&hasher.finalize()[..16])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_quoted_os_release_without_accepting_control_sequences() {
+        let release = parse_os_release(
+            "NAME=\"Example Linux\"\nID=example\nID_LIKE=\"debian ubuntu\"\nVERSION_ID='24.04'\nPRETTY_NAME=\"Example\\ Linux\u{1b}[31m\"\ninvalid-key=value\n",
+        )
+        .unwrap();
+        assert_eq!(release.id.as_deref(), Some("example"));
+        assert_eq!(release.version_id.as_deref(), Some("24.04"));
+        assert_eq!(release.id_like, ["debian", "ubuntu"]);
+        assert_eq!(release.pretty_name.as_deref(), Some("Example Linux"));
+    }
+
+    #[test]
+    fn schema_v1_host_without_linux_fields_still_deserializes() {
+        let host: HostInfo = serde_json::from_value(serde_json::json!({
+            "os": "macos",
+            "os_version": "14.0",
+            "architecture": "arm64"
+        }))
+        .unwrap();
+        assert!(host.linux_distribution.is_none());
+    }
+
+    #[test]
+    fn complete_schema_v1_snapshot_remains_readable() {
+        let mut value = serde_json::to_value(Snapshot::empty(ScanScope::default())).unwrap();
+        value["schema_version"] = 1.into();
+        value["host"]
+            .as_object_mut()
+            .unwrap()
+            .remove("linux_distribution");
+        let snapshot: Snapshot = serde_json::from_value(value).unwrap();
+        assert_eq!(snapshot.schema_version, 1);
+        assert!(snapshot.host.linux_distribution.is_none());
+    }
 }

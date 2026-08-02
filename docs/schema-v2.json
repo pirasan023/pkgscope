@@ -1,0 +1,274 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/pirasan023/pkgscope/blob/main/docs/schema-v2.json",
+  "title": "pkgscope snapshot schema v2",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "generated_at",
+    "scan_id",
+    "host",
+    "scope",
+    "partial",
+    "manager_instances",
+    "installations",
+    "commands",
+    "findings",
+    "errors"
+  ],
+  "properties": {
+    "schema_version": { "const": 2 },
+    "generated_at": { "$ref": "#/$defs/timestamp" },
+    "scan_id": { "type": "string", "format": "uuid" },
+    "host": {
+      "type": "object",
+      "required": ["os", "os_version", "architecture"],
+      "properties": {
+        "os": { "type": "string" },
+        "os_version": { "type": ["string", "null"] },
+        "architecture": { "type": "string" },
+        "linux_distribution": {
+          "type": "object",
+          "required": ["id", "name", "pretty_name", "version_id", "version_codename", "id_like"],
+          "properties": {
+            "id": { "type": ["string", "null"] },
+            "name": { "type": ["string", "null"] },
+            "pretty_name": { "type": ["string", "null"] },
+            "version_id": { "type": ["string", "null"] },
+            "version_codename": { "type": ["string", "null"] },
+            "id_like": { "type": "array", "items": { "type": "string" } }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "scope": {
+      "type": "object",
+      "required": ["user_scope", "environment_mode", "history_enabled", "project_roots"],
+      "properties": {
+        "user_scope": { "const": "current" },
+        "environment_mode": { "enum": ["active", "deep"] },
+        "history_enabled": { "type": "boolean" },
+        "project_roots": { "type": "array", "items": { "type": "string" } },
+        "requested_managers": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/manager" }
+        }
+      },
+      "additionalProperties": true
+    },
+    "partial": { "type": "boolean" },
+    "manager_instances": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/manager_instance" }
+    },
+    "installations": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/installation" }
+    },
+    "commands": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/command" }
+    },
+    "findings": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/finding" }
+    },
+    "errors": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/error" }
+    }
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "timestamp": { "type": "string", "format": "date-time" },
+    "manager": { "enum": ["brew", "npm", "pnpm", "pipx", "uv", "cargo", "apt", "dnf", "pacman", "snap", "flatpak"] },
+    "confidence": { "enum": ["unknown", "ambiguous", "estimated", "high", "exact"] },
+    "field_string": {
+      "type": "object",
+      "required": ["value", "source", "confidence", "observed_at"],
+      "properties": {
+        "value": { "type": ["string", "null"] },
+        "source": { "type": "string" },
+        "confidence": { "$ref": "#/$defs/confidence" },
+        "observed_at": { "$ref": "#/$defs/timestamp" }
+      },
+      "additionalProperties": true
+    },
+    "manager_instance": {
+      "type": "object",
+      "required": [
+        "id",
+        "manager",
+        "executable_path",
+        "architecture",
+        "scope_owner",
+        "discovered_by",
+        "scan_status",
+        "scanned_at",
+        "capabilities"
+      ],
+      "properties": {
+        "id": { "type": "string" },
+        "manager": { "$ref": "#/$defs/manager" },
+        "executable_path": { "type": "string" },
+        "root": { "type": ["string", "null"] },
+        "runtime": { "type": ["object", "null"] },
+        "runtime_manager": { "type": ["string", "null"] },
+        "architecture": { "type": "string" },
+        "scope_owner": { "type": "string" },
+        "discovered_by": { "type": "array", "items": { "type": "string" } },
+        "scan_status": {
+          "enum": [
+            "success",
+            "partial",
+            "unavailable",
+            "timed_out",
+            "permission_denied",
+            "parse_error",
+            "failed"
+          ]
+        },
+        "scanned_at": { "$ref": "#/$defs/timestamp" },
+        "capabilities": { "type": "array", "items": { "type": "string" } }
+      },
+      "additionalProperties": true
+    },
+    "installation": {
+      "type": "object",
+      "required": [
+        "id",
+        "identity",
+        "manager_instance_id",
+        "category",
+        "version",
+        "architecture",
+        "install_type",
+        "intent",
+        "environment",
+        "paths",
+        "dates",
+        "sizes",
+        "command_ids",
+        "finding_ids",
+        "removal_plan_available"
+      ],
+      "properties": {
+        "id": { "type": "string" },
+        "identity": {
+          "type": "object",
+          "required": ["ecosystem", "name", "source_kind"],
+          "properties": {
+            "ecosystem": { "type": "string" },
+            "name": { "type": "string" },
+            "source_kind": {
+              "enum": ["registry", "git", "path", "tarball", "formula", "cask", "linked", "deb", "rpm", "pacman", "snap", "flatpak", "unknown"]
+            },
+            "source_ref": { "type": ["string", "null"] }
+          },
+          "additionalProperties": true
+        },
+        "manager_instance_id": { "type": "string" },
+        "category": { "enum": ["cli", "app", "font", "library", "other"] },
+        "version": { "$ref": "#/$defs/field_string" },
+        "architecture": { "$ref": "#/$defs/field_string" },
+        "install_type": { "enum": ["normal", "linked", "editable", "dependency", "injected", "unknown"] },
+        "intent": { "enum": ["explicit", "dependency", "unknown"] },
+        "environment": { "type": "string" },
+        "paths": {
+          "type": "object",
+          "required": ["install_root", "bins", "artifacts", "configs", "dedicated_caches"],
+          "properties": {
+            "install_root": { "type": ["string", "null"] },
+            "bins": { "type": "array", "items": { "type": "string" } },
+            "artifacts": { "type": "array", "items": { "type": "string" } },
+            "configs": { "type": "array", "items": { "type": "string" } },
+            "dedicated_caches": { "type": "array", "items": { "type": "string" } }
+          },
+          "additionalProperties": true
+        },
+        "dates": { "type": "object", "additionalProperties": true },
+        "sizes": {
+          "type": "object",
+          "required": ["confidence", "method"],
+          "properties": {
+            "owned_apparent_bytes": { "type": ["integer", "null"], "minimum": 0 },
+            "owned_allocated_bytes": { "type": ["integer", "null"], "minimum": 0 },
+            "shared_store_bytes": { "type": ["integer", "null"], "minimum": 0 },
+            "dedicated_cache_bytes": { "type": ["integer", "null"], "minimum": 0 },
+            "estimated_reclaimable_bytes": { "type": ["integer", "null"], "minimum": 0 },
+            "confidence": { "$ref": "#/$defs/confidence" },
+            "method": { "type": "string" }
+          },
+          "additionalProperties": true
+        },
+        "command_ids": { "type": "array", "items": { "type": "string" } },
+        "finding_ids": { "type": "array", "items": { "type": "string" } },
+        "removal_plan_available": { "type": "boolean" },
+        "metadata": { "type": "object" }
+      },
+      "additionalProperties": true
+    },
+    "command": {
+      "type": "object",
+      "required": ["id", "name", "path", "owner_installation_id", "on_current_path", "exposure_state"],
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "path": { "type": "string" },
+        "real_path": { "type": ["string", "null"] },
+        "owner_installation_id": { "type": "string" },
+        "path_rank": { "type": ["integer", "null"], "minimum": 1 },
+        "on_current_path": { "type": "boolean" },
+        "exposure_state": { "enum": ["active", "shadowed", "hidden", "broken"] },
+        "shell_resolution": { "type": ["object", "null"] }
+      },
+      "additionalProperties": true
+    },
+    "finding": {
+      "type": "object",
+      "required": [
+        "id",
+        "code",
+        "severity",
+        "confidence",
+        "installation_ids",
+        "command_ids",
+        "title",
+        "explanation",
+        "evidence_refs",
+        "first_seen_at",
+        "last_seen_at"
+      ],
+      "properties": {
+        "id": { "type": "string" },
+        "code": { "type": "string" },
+        "severity": { "enum": ["info", "review", "warning", "critical"] },
+        "confidence": { "$ref": "#/$defs/confidence" },
+        "installation_ids": { "type": "array", "items": { "type": "string" } },
+        "command_ids": { "type": "array", "items": { "type": "string" } },
+        "title": { "type": "string" },
+        "explanation": { "type": "string" },
+        "evidence_refs": { "type": "array", "items": { "type": "string" } },
+        "suggested_action": { "type": ["string", "null"] },
+        "first_seen_at": { "$ref": "#/$defs/timestamp" },
+        "last_seen_at": { "$ref": "#/$defs/timestamp" }
+      },
+      "additionalProperties": true
+    },
+    "error": {
+      "type": "object",
+      "required": ["manager", "code", "message", "recoverable", "occurred_at"],
+      "properties": {
+        "manager": { "$ref": "#/$defs/manager" },
+        "manager_instance_id": { "type": ["string", "null"] },
+        "code": { "type": "string" },
+        "message": { "type": "string" },
+        "recoverable": { "type": "boolean" },
+        "occurred_at": { "$ref": "#/$defs/timestamp" }
+      },
+      "additionalProperties": true
+    }
+  }
+}

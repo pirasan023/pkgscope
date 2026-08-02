@@ -144,7 +144,7 @@ fn scans_five_manager_fixtures_and_emits_clean_json_and_plans() {
         String::from_utf8_lossy(&output.stderr)
     );
     let snapshot: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(snapshot["schema_version"], 1);
+    assert_eq!(snapshot["schema_version"], 2);
     assert_eq!(snapshot["partial"], false);
     let names: BTreeSet<_> = snapshot["installations"]
         .as_array()
@@ -203,6 +203,209 @@ fn scans_five_manager_fixtures_and_emits_clean_json_and_plans() {
 }
 
 #[test]
+fn scans_linux_manager_fixtures_with_explicit_packages_and_separate_flatpak_scopes() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let mock_bin = temp.path().join("mock-bin");
+    let cargo_home = temp.path().join("cargo-home");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&mock_bin).unwrap();
+
+    executable(&mock_bin.join("apt-get"), "#!/bin/sh\nexit 0\n");
+    executable(
+        &mock_bin.join("apt-mark"),
+        "#!/bin/sh\n[ \"$1\" = showmanual ] && printf '%s\\n' demo-apt\n",
+    );
+    executable(
+        &mock_bin.join("dpkg-query"),
+        "#!/bin/sh\nif [ \"$1\" = --show ]; then printf 'demo-apt\\t1.2-1\\tamd64\\t12\\thttps://apt.example\\tAPT demo\\tii \\tlibc6 (>= 2)\\tca-certificates\\n'; elif [ \"$1\" = --listfiles ]; then printf '/usr/bin/demo-apt\\n'; else exit 2; fi\n",
+    );
+
+    executable(
+        &mock_bin.join("dnf"),
+        "#!/bin/sh\ncase \"$*\" in *repoquery*) printf '%s\\n' demo-dnf ;; *) exit 2 ;; esac\n",
+    );
+    executable(
+        &mock_bin.join("rpm"),
+        "#!/bin/sh\nif [ \"$1\" = -qa ]; then printf 'demo-dnf\\t0:2.0-3\\tx86_64\\t2048\\t1700000000\\tDNF demo\\thttps://dnf.example\\n'; elif [ \"$1\" = -ql ]; then printf '/usr/bin/demo-dnf\\n'; else exit 2; fi\n",
+    );
+
+    let pacman_root = temp.path().join("pacman-root");
+    let pacman_db = pacman_root.join("var/lib/pacman");
+    let pacman_package = pacman_db.join("local/demo-pacman-3.0-1");
+    fs::create_dir_all(&pacman_package).unwrap();
+    fs::write(
+        pacman_package.join("desc"),
+        "%NAME%\ndemo-pacman\n\n%VERSION%\n3.0-1\n\n%DESC%\nPacman demo\n\n%URL%\nhttps://pacman.example\n\n%ARCH%\nx86_64\n\n%ISIZE%\n3072\n\n%INSTALLDATE%\n1700000000\n\n%DEPENDS%\nglibc>=2\n",
+    )
+    .unwrap();
+    fs::write(
+        pacman_package.join("files"),
+        "%FILES%\nusr/bin/demo-pacman\n",
+    )
+    .unwrap();
+    executable(
+        &pacman_root.join("usr/bin/demo-pacman"),
+        "#!/bin/sh\nexit 0\n",
+    );
+    executable(
+        &mock_bin.join("pacman"),
+        "#!/bin/sh\n[ \"$1\" = -Qqe ] && printf '%s\\n' demo-pacman\n",
+    );
+    executable(
+        &mock_bin.join("pacman-conf"),
+        &format!(
+            "#!/bin/sh\nif [ \"$1\" = RootDir ]; then printf '%s\\n' '{}'; elif [ \"$1\" = DBPath ]; then printf '%s\\n' '{}'; else exit 2; fi\n",
+            pacman_root.display(),
+            pacman_db.display()
+        ),
+    );
+
+    let snap_mount = temp.path().join("snap-mount");
+    let snap_state = temp.path().join("snap-state");
+    fs::create_dir_all(snap_mount.join("demo-snap/current/meta")).unwrap();
+    fs::write(
+        snap_mount.join("demo-snap/current/meta/snap.yaml"),
+        "name: demo-snap\nversion: '4.0'\nsummary: Snap demo\ndescription: Local Snap demo\nwebsite: https://snap.example\nbase: core24\narchitectures: [amd64]\napps:\n  demo-snap:\n    command: bin/demo\n",
+    )
+    .unwrap();
+    fs::create_dir_all(snap_mount.join("core24/current/meta")).unwrap();
+    fs::write(
+        snap_mount.join("core24/current/meta/snap.yaml"),
+        "name: core24\ntype: base\n",
+    )
+    .unwrap();
+    executable(&snap_mount.join("bin/demo-snap"), "#!/bin/sh\nexit 0\n");
+    fs::create_dir_all(snap_state.join("snaps")).unwrap();
+    fs::write(snap_state.join("snaps/demo-snap_10.snap"), b"snap-bytes").unwrap();
+    executable(
+        &mock_bin.join("snap"),
+        "#!/bin/sh\nprintf 'Name Version Rev Tracking Publisher Notes\\ndemo-snap 4.0 10 stable demo -\\ncore24 1 20 latest canonical base\\n'\n",
+    );
+
+    let flatpak_root = temp.path().join("flatpak-app");
+    fs::create_dir_all(flatpak_root.join("files/share/metainfo")).unwrap();
+    fs::write(
+        flatpak_root.join("files/share/metainfo/org.demo.App.metainfo.xml"),
+        "<component><url type=\"homepage\">https://flatpak.example</url></component>",
+    )
+    .unwrap();
+    executable(
+        &mock_bin.join("flatpak"),
+        &format!(
+            "#!/bin/sh\ncase \"$*\" in\n  'list --app --columns=application,version,arch,installation,origin,ref,size,name,description,runtime') printf 'Application\\tVersion\\tArch\\tInstallation\\tOrigin\\tRef\\tSize\\tName\\tDescription\\tRuntime\\norg.demo.App\\t5.0\\tx86_64\\tuser\\tlocal\\tapp/org.demo.App/x86_64/stable\\t1.5 MB\\tDemo\\tFlatpak demo\\torg.demo.Runtime/x86_64/1\\norg.demo.System\\t6.0\\taarch64\\textra\\tlocal\\tapp/org.demo.System/aarch64/stable\\t2 MB\\tSystem Demo\\tSystem Flatpak demo\\torg.demo.Runtime/aarch64/1\\n' ;;\n  '--user info --show-location app/org.demo.App/x86_64/stable') printf '%s\\n' '{}' ;;\n  '--installation=extra info --show-location app/org.demo.System/aarch64/stable') printf '%s\\n' '{}' ;;\n  *) exit 2 ;;\nesac\n",
+            flatpak_root.display(),
+            flatpak_root.display()
+        ),
+    );
+
+    let mut command = pkgscope_command(&home, &mock_bin, &cargo_home);
+    let output = command
+        .env("SNAP_MOUNT_DIR", &snap_mount)
+        .env("SNAPD_STATE_DIR", &snap_state)
+        .args([
+            "scan",
+            "--manager",
+            "apt",
+            "--manager",
+            "dnf",
+            "--manager",
+            "pacman",
+            "--manager",
+            "snap",
+            "--manager",
+            "flatpak",
+            "--format",
+            "json",
+            "--quiet",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let snapshot: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(snapshot["schema_version"], 2);
+    assert_eq!(snapshot["partial"], false);
+    let records = snapshot["installations"].as_array().unwrap();
+    let names = records
+        .iter()
+        .map(|record| record["identity"]["name"].as_str().unwrap())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        names,
+        BTreeSet::from([
+            "demo-apt",
+            "demo-dnf",
+            "demo-pacman",
+            "demo-snap",
+            "org.demo.App",
+            "org.demo.System"
+        ])
+    );
+    assert!(!names.contains("core24"));
+    let snap = records
+        .iter()
+        .find(|record| record["identity"]["name"] == "demo-snap")
+        .unwrap();
+    assert_eq!(snap["metadata"]["dependencies"], json!(["core24"]));
+    let flatpak_scopes = records
+        .iter()
+        .filter(|record| record["identity"]["ecosystem"] == "flatpak")
+        .map(|record| record["environment"].as_str().unwrap())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(flatpak_scopes, BTreeSet::from(["system:extra", "user"]));
+    let apt = records
+        .iter()
+        .find(|record| record["identity"]["name"] == "demo-apt")
+        .unwrap();
+    assert_eq!(apt["intent"], "explicit");
+    assert_eq!(apt["metadata"]["homepage"], "https://apt.example");
+    assert_eq!(apt["metadata"]["description"], "APT demo");
+    assert_eq!(apt["sizes"]["owned_apparent_bytes"], 12 * 1024);
+    assert_eq!(
+        apt["metadata"]["dependencies"],
+        json!(["libc6", "ca-certificates"])
+    );
+    let dnf = records
+        .iter()
+        .find(|record| record["identity"]["name"] == "demo-dnf")
+        .unwrap();
+    assert_eq!(dnf["metadata"]["description"], "DNF demo");
+    assert_eq!(dnf["sizes"]["owned_apparent_bytes"], 2048);
+    let pacman = records
+        .iter()
+        .find(|record| record["identity"]["name"] == "demo-pacman")
+        .unwrap();
+    assert_eq!(pacman["metadata"]["description"], "Pacman demo");
+    assert_eq!(pacman["metadata"]["dependencies"], json!(["glibc"]));
+    assert_eq!(pacman["command_ids"].as_array().unwrap().len(), 1);
+    assert_eq!(snap["metadata"]["description"], "Local Snap demo");
+    assert!(snap["sizes"]["owned_apparent_bytes"].as_u64().unwrap() > 0);
+    let user_flatpak = records
+        .iter()
+        .find(|record| record["identity"]["name"] == "org.demo.App")
+        .unwrap();
+    assert_eq!(user_flatpak["metadata"]["description"], "Flatpak demo");
+    assert_eq!(
+        user_flatpak["metadata"]["runtime"],
+        "org.demo.Runtime/x86_64/1"
+    );
+    assert_eq!(user_flatpak["metadata"]["delete_user_data"], false);
+
+    let mut plan = pkgscope_command(&home, &mock_bin, &cargo_home);
+    plan.env("SNAP_MOUNT_DIR", &snap_mount)
+        .env("SNAPD_STATE_DIR", &snap_state)
+        .args(["removal-plan", "demo-snap", "--manager", "snap", "--quiet"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("snap remove demo-snap"))
+        .stdout(predicates::str::contains("--purge is never used"));
+}
+
+#[test]
 fn manager_failure_is_partial_json_with_exit_code_three() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("home");
@@ -223,6 +426,76 @@ fn manager_failure_is_partial_json_with_exit_code_three() {
     assert_eq!(snapshot["partial"], true);
     assert_eq!(snapshot["errors"][0]["manager"], "pnpm");
     assert_eq!(snapshot["manager_instances"][0]["scan_status"], "failed");
+}
+
+#[test]
+fn missing_manager_is_a_successful_unused_environment() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let empty_path = temp.path().join("empty-path");
+    let cargo_home = temp.path().join("cargo-home");
+    fs::create_dir_all(&empty_path).unwrap();
+    let mut command = pkgscope_command(&home, &empty_path, &cargo_home);
+    let output = command
+        .args([
+            "scan",
+            "--manager",
+            "flatpak",
+            "--format",
+            "json",
+            "--quiet",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let snapshot: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(snapshot["partial"], false);
+    assert_eq!(snapshot["manager_instances"], json!([]));
+    assert_eq!(snapshot["installations"], json!([]));
+}
+
+#[test]
+fn all_managers_bound_and_sanitize_malformed_future_output_without_panicking() {
+    for (manager, executable_name) in [
+        ("brew", "brew"),
+        ("npm", "npm"),
+        ("pnpm", "pnpm"),
+        ("pipx", "pipx"),
+        ("uv", "uv"),
+        ("cargo", "cargo"),
+        ("apt", "apt-get"),
+        ("dnf", "dnf"),
+        ("pacman", "pacman"),
+        ("snap", "snap"),
+        ("flatpak", "flatpak"),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let mock_bin = temp.path().join("mock-bin");
+        let cargo_home = temp.path().join("cargo-home");
+        fs::create_dir_all(&mock_bin).unwrap();
+        executable(
+            &mock_bin.join(executable_name),
+            "#!/bin/sh\nprintf 'future-field\\tbroken\\033[2Jvalue\\n'\n",
+        );
+        let mut command = pkgscope_command(&home, &mock_bin, &cargo_home);
+        let output = command
+            .args(["scan", "--manager", manager, "--format", "json", "--quiet"])
+            .output()
+            .unwrap();
+        assert!(
+            matches!(output.status.code(), Some(0 | 3)),
+            "{manager} exited unexpectedly: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.stdout.len() < 16 * 1024 * 1024);
+        let snapshot: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(snapshot["schema_version"], 2, "manager {manager}");
+        assert!(
+            !String::from_utf8_lossy(&output.stdout).contains("\u{1b}"),
+            "manager {manager} leaked terminal controls"
+        );
+    }
 }
 
 #[test]

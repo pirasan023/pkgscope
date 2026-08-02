@@ -4,6 +4,18 @@ All notable changes are documented here. The project follows semantic versioning
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-02
+
+### Added
+
+- Native Linux x64 and ARM64 support with statically linked musl releases, ELF CPU detection, `os-release` host metadata, Linuxbrew discovery, and Linux-aware filesystem measurements.
+- Local, explicit-package inventory for apt, DNF4/DNF5, and pacman; application inventory for Snap; and separate user/default/named system Flatpak scopes.
+- Manager-native Linux metadata for descriptions, URLs, versions, CPU, sizes, install times, dependencies, and commands without registry or repository lookups.
+- Exact target-only apt, DNF, and pacman transaction verification; explicit root preconditions without automatic `sudo`; non-purging Snap and data-preserving Flatpak removal.
+- JSON schema v2 and automatic fresh scanning when a readable schema-v1 snapshot is encountered.
+- Linux ARM64/x64 npm packages, four-target release archives, SBOMs, checksums, provenance, a cross-platform Homebrew Formula, Linux distribution CI, and publication re-verification.
+- Pseudo-terminal automation for the complete navigation, sorting, search, details, confirmation, cancellation, rejection, deletion, and rescan flow.
+
 ## [0.2.0] - 2026-08-02
 
 ### Added

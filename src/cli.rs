@@ -60,11 +60,11 @@ pub(crate) struct CommonOptions {
     #[arg(long, global = true, value_parser = crate::config::parse_duration, hide = true)]
     timeout: Option<Duration>,
 
-    /// Opt in to history evidence (accepted but not read by the v0.2 scanner)
+    /// Opt in to history evidence (accepted but not read by the v0.3 scanner)
     #[arg(long, global = true, hide = true)]
     history: bool,
 
-    /// Opt in to a project root (accepted but not read by the v0.2 scanner)
+    /// Opt in to a project root (accepted but not read by the v0.3 scanner)
     #[arg(long, global = true, value_name = "PATH", hide = true)]
     project_root: Vec<PathBuf>,
 
@@ -207,7 +207,7 @@ pub fn run() -> Result<u8> {
     let default_order = SortOrder::from(config.ui.default_order);
     if (cli.common.history || !cli.common.project_root.is_empty()) && !cli.common.quiet {
         eprintln!(
-            "notice: history and project evidence are not read by the v0.2 scanner; no history or project file content was accessed"
+            "notice: history and project evidence are not read by the v0.3 scanner; no history or project file content was accessed"
         );
     }
     if matches!(cli.command, Some(Command::Reset)) {
@@ -398,7 +398,8 @@ pub fn run() -> Result<u8> {
 }
 
 fn cache_matches_request(snapshot: &Snapshot, common: &CommonOptions) -> bool {
-    snapshot.scope.requested_managers.is_empty()
+    snapshot.schema_version == crate::model::SCHEMA_VERSION
+        && snapshot.scope.requested_managers.is_empty()
         && common.manager.is_empty()
         && snapshot.scope.environment_mode
             == if common.all_environments {
@@ -443,7 +444,7 @@ pub(crate) fn scan_options(common: &CommonOptions) -> ScanOptions {
         all_environments: common.all_environments,
         timeout: common.timeout.unwrap_or(Duration::from_secs(10)),
         calculate_sizes: true,
-        // v0.2 intentionally does not read either opt-in source yet.
+        // v0.3 intentionally does not read either opt-in source yet.
         history: false,
         project_roots: Vec::new(),
         verbose: common.verbose,
@@ -647,6 +648,51 @@ pub fn build_removal_plan(snapshot: &Snapshot, record: &InstallationRecord) -> R
             }
             vec!["uninstall".into(), record.identity.name.clone()]
         }
+        ManagerKind::Apt => vec![
+            "--assume-yes".into(),
+            "--no-auto-remove".into(),
+            "remove".into(),
+            "--".into(),
+            record.identity.name.clone(),
+        ],
+        ManagerKind::Dnf => vec![
+            "--assumeyes".into(),
+            "--setopt=clean_requirements_on_remove=False".into(),
+            "remove".into(),
+            record
+                .metadata
+                .get("rpm_name_arch")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(&record.identity.name)
+                .to_string(),
+        ],
+        ManagerKind::Pacman => vec![
+            "-R".into(),
+            "--noconfirm".into(),
+            "--".into(),
+            record.identity.name.clone(),
+        ],
+        ManagerKind::Snap => vec!["remove".into(), record.identity.name.clone()],
+        ManagerKind::Flatpak => {
+            let installation = record
+                .metadata
+                .get("flatpak_installation")
+                .and_then(serde_json::Value::as_str)
+                .context("Flatpak installation scope is missing")?;
+            let reference = record
+                .metadata
+                .get("flatpak_ref")
+                .and_then(serde_json::Value::as_str)
+                .context("Flatpak installed ref is missing")?;
+            let mut args = crate::scanner::flatpak::scope_args(installation);
+            args.extend([
+                "uninstall".into(),
+                "--noninteractive".into(),
+                "--no-related".into(),
+                reference.into(),
+            ]);
+            args
+        }
     };
     let managed_dependents = reverse_dependents(snapshot, record);
     let mut warnings = Vec::new();
@@ -662,6 +708,21 @@ pub fn build_removal_plan(snapshot: &Snapshot, record: &InstallationRecord) -> R
     if record.identity.name == "pkgscope" {
         warnings.push("pkgscope self-uninstall is blocked before manager execution.".into());
     }
+    let requires_root = record
+        .metadata
+        .get("requires_root")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    if requires_root {
+        let reason = record
+            .metadata
+            .get("privilege_reason")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("the owning manager modifies a system installation");
+        warnings.push(format!(
+            "Root privileges are required because {reason}. pkgscope never starts sudo automatically."
+        ));
+    }
     let mut related_data_excluded = vec![
         "manager shared caches and stores".into(),
         "user configuration and logs".into(),
@@ -672,6 +733,15 @@ pub fn build_removal_plan(snapshot: &Snapshot, record: &InstallationRecord) -> R
         related_data_excluded
             .push("Homebrew cask zap artifacts (--zap is never planned by default)".into());
     }
+    if instance.manager == ManagerKind::Snap {
+        related_data_excluded
+            .push("Snap user and system data (remove --purge is never used)".into());
+    }
+    if instance.manager == ManagerKind::Flatpak {
+        related_data_excluded
+            .push("Flatpak per-application user data (--delete-data is never used)".into());
+        related_data_excluded.push("Related runtimes (--no-related is always used)".into());
+    }
     // Keep argv plainly structured. TUI execution passes it directly to the owning manager.
     argv.shrink_to_fit();
     Ok(RemovalPlan {
@@ -679,11 +749,23 @@ pub fn build_removal_plan(snapshot: &Snapshot, record: &InstallationRecord) -> R
         manager_instance_id: instance.id.clone(),
         target_name: record.identity.name.clone(),
         target_version: record.version.value.clone(),
-        preconditions: vec![
-            "identity_unchanged".into(),
-            "owner_unchanged".into(),
-            "not_current_process_or_required_runtime".into(),
-        ],
+        preconditions: {
+            let mut preconditions = vec![
+                "identity_unchanged".into(),
+                "owner_unchanged".into(),
+                "not_current_process_or_required_runtime".into(),
+            ];
+            if matches!(
+                instance.manager,
+                ManagerKind::Apt | ManagerKind::Dnf | ManagerKind::Pacman
+            ) {
+                preconditions.push("removal_transaction_contains_only_target".into());
+            }
+            if requires_root {
+                preconditions.push("already_running_with_root_privileges".into());
+            }
+            preconditions
+        },
         managed_dependents,
         warnings,
         action: RemovalAction {
@@ -698,7 +780,7 @@ pub fn build_removal_plan(snapshot: &Snapshot, record: &InstallationRecord) -> R
 }
 
 fn reverse_dependents(snapshot: &Snapshot, target: &InstallationRecord) -> Vec<String> {
-    snapshot
+    let mut dependents = snapshot
         .installations
         .iter()
         .filter(|candidate| candidate.manager_instance_id == target.manager_instance_id)
@@ -714,7 +796,20 @@ fn reverse_dependents(snapshot: &Snapshot, target: &InstallationRecord) -> Vec<S
                 })
         })
         .map(|record| record.identity.name.clone())
-        .collect()
+        .collect::<Vec<_>>();
+    dependents.extend(
+        target
+            .metadata
+            .get("required_by")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+            .map(str::to_string),
+    );
+    dependents.sort();
+    dependents.dedup();
+    dependents
 }
 
 fn doctor(common: &CommonOptions, config: &crate::config::Config) -> Result<u8> {
@@ -798,7 +893,11 @@ fn doctor(common: &CommonOptions, config: &crate::config::Config) -> Result<u8> 
     let managers: Vec<_> = ManagerKind::ALL
         .into_iter()
         .map(|manager| {
-            let executables = crate::process::find_executables(manager.executable());
+            let executables = manager
+                .executable_names()
+                .iter()
+                .flat_map(|name| crate::process::find_executables(name))
+                .collect::<std::collections::BTreeSet<_>>();
             serde_json::json!({
                 "manager": manager,
                 "executables": executables,
@@ -826,7 +925,9 @@ fn doctor(common: &CommonOptions, config: &crate::config::Config) -> Result<u8> 
         }
         println!(
             "  Signing:  {}",
-            if signature_valid && developer_id_signed {
+            if std::env::consts::OS == "linux" {
+                "unsigned Linux binary; verify SHA-256 and GitHub provenance"
+            } else if signature_valid && developer_id_signed {
                 "valid Developer ID signature"
             } else if signature_valid {
                 "valid local/ad-hoc signature (not Developer ID)"
@@ -836,7 +937,11 @@ fn doctor(common: &CommonOptions, config: &crate::config::Config) -> Result<u8> 
         );
         println!("  Managers:");
         for manager in ManagerKind::ALL {
-            let paths = crate::process::find_executables(manager.executable());
+            let paths = manager
+                .executable_names()
+                .iter()
+                .flat_map(|name| crate::process::find_executables(name))
+                .collect::<std::collections::BTreeSet<_>>();
             if paths.is_empty() {
                 println!("    {manager:<6} not found (normal if unused)");
             } else {
@@ -904,5 +1009,28 @@ mod tests {
             Duration::from_secs(10)
         );
         assert!(crate::config::parse_duration("0s").is_err());
+    }
+
+    #[test]
+    fn schema_v1_snapshots_are_never_reused_by_v03() {
+        let mut snapshot = Snapshot::empty(crate::model::ScanScope::default());
+        snapshot.schema_version = 1;
+        let common = CommonOptions {
+            manager: Vec::new(),
+            environment: Vec::new(),
+            all_environments: false,
+            refresh: false,
+            offline: false,
+            timeout: None,
+            history: false,
+            project_root: Vec::new(),
+            format: OutputFormat::Json,
+            color: None,
+            quiet: true,
+            verbose: false,
+        };
+        assert!(!cache_matches_request(&snapshot, &common));
+        snapshot.schema_version = crate::model::SCHEMA_VERSION;
+        assert!(cache_matches_request(&snapshot, &common));
     }
 }

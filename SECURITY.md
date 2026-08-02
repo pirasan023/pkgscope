@@ -2,12 +2,18 @@
 
 ## Reporting
 
-Please report suspected vulnerabilities privately through GitHub Security Advisories for this repository. Do not include credentials, complete shell history, private registry output, or other secrets in a report. A minimal redacted reproducer is preferred.
+Report suspected vulnerabilities privately through GitHub Security Advisories for this repository. Do not include credentials, full shell history, private registry output, or other secrets. A minimal redacted reproducer is preferred.
 
-## Security boundary
+## Runtime boundary
 
-pkgscope treats manager executables, manager metadata, paths, and filenames as untrusted local inputs. Manager processes are invoked directly with an executable and argument array, never through a shell. Output is bounded and timed out, terminal controls are removed, and symlinks are not recursively followed for size scans. TUI uninstall requires exact-name confirmation and a fresh identity/owner/action revalidation; it refuses self, required manager/runtime, and reported managed-dependent removal before invoking the owning package manager.
+pkgscope treats manager executables, local manager metadata, paths, filenames, and terminal text as untrusted. Processes are invoked with an executable and argument array, never through a shell. Output is bounded and timed out, control characters are removed, and symlinks are not recursively followed for size scans.
 
-Snapshot state intentionally excludes registry credentials, environment dumps, raw shell history, and project file contents. Telemetry is disabled and not implemented.
+TUI uninstall requires exact-name confirmation followed by a fresh identity, ownership, version, dependency, privilege, and action revalidation. pkgscope refuses self-removal, manager/runtime removal, and known managed-dependent removal. apt, DNF, and pacman removal proceeds only if local dry-run/test commands prove an exact target-only transaction. No safety proof means refusal. pkgscope does not launch `sudo`; system actions run only when the process is already privileged. Snap data, Flatpak user data, related Flatpak refs, and Homebrew zap data are not deleted.
 
-Signed public releases are expected to include SHA-256 checksums, an SBOM, GitHub build provenance, Developer ID signatures, and Apple notarization. If any mandatory signing/notarization secret is absent, the release workflow fails instead of publishing an unsigned substitute.
+Snapshot state excludes registry credentials, environment dumps, raw shell history, and project-file contents. Inventory does not require network access. Telemetry is disabled and not implemented.
+
+## Release boundary
+
+Release binaries are intentionally unsigned and Apple-notarization is not claimed. Every release is instead required to provide SHA-256 checksums, a CycloneDX SBOM for each target, and GitHub build-provenance attestations. Linux artifacts must also pass static-link, exact-CPU, and startup checks. Clean Linux x64 and ARM64 jobs re-download and exercise both npm and GitHub artifacts after publication.
+
+Users should verify the downloaded archive against `SHA256SUMS` and its GitHub attestation. These checks establish artifact integrity and recorded build provenance; they are not a substitute for platform code signing.

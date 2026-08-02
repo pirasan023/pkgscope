@@ -1,8 +1,13 @@
+mod apt;
 mod brew;
 mod cargo;
+mod dnf;
+pub(crate) mod flatpak;
 mod npm;
+mod pacman;
 mod pipx;
 mod pnpm;
+mod snap;
 mod uv;
 
 use std::{
@@ -171,6 +176,11 @@ pub fn scan(options: &ScanOptions) -> Snapshot {
 }
 
 fn normalize_instances(snapshot: &mut Snapshot) {
+    let original_environments: BTreeMap<_, _> = snapshot
+        .manager_instances
+        .iter()
+        .map(|instance| (instance.id.clone(), environment_label(instance)))
+        .collect();
     let mut groups: BTreeMap<String, Vec<ManagerInstance>> = BTreeMap::new();
     for mut instance in snapshot.manager_instances.drain(..) {
         instance.executable_path = terminal_text(&instance.executable_path);
@@ -263,10 +273,15 @@ fn normalize_instances(snapshot: &mut Snapshot) {
     let mut installation_remap = BTreeMap::new();
     for record in &mut snapshot.installations {
         let old_id = record.id.clone();
+        let old_instance_id = record.manager_instance_id.clone();
         if let Some(instance_id) = instance_remap.get(&record.manager_instance_id) {
             record.manager_instance_id = instance_id.clone();
         }
-        if let Some(environment) = instance_environments.get(&record.manager_instance_id) {
+        if original_environments
+            .get(&old_instance_id)
+            .is_some_and(|environment| environment == &record.environment)
+            && let Some(environment) = instance_environments.get(&record.manager_instance_id)
+        {
             record.environment = environment.clone();
         }
         record.id = stable_id(&[
@@ -321,10 +336,21 @@ fn discover_instances(
 ) -> Vec<ManagerInstance> {
     let mut discovered = Vec::new();
     for manager in requested {
-        let mut paths = process::find_executables(manager.executable());
+        let mut paths = manager
+            .executable_names()
+            .iter()
+            .flat_map(|name| process::find_executables(name))
+            .collect::<Vec<_>>();
         if *manager == ManagerKind::Brew {
-            for path in ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"] {
-                let path = PathBuf::from(path);
+            let mut standard_paths = vec![
+                PathBuf::from("/opt/homebrew/bin/brew"),
+                PathBuf::from("/usr/local/bin/brew"),
+                PathBuf::from("/home/linuxbrew/.linuxbrew/bin/brew"),
+            ];
+            if let Some(home) = dirs::home_dir() {
+                standard_paths.push(home.join(".linuxbrew/bin/brew"));
+            }
+            for path in standard_paths {
                 if process::is_executable(&path) && !paths.contains(&path) {
                     paths.push(path);
                 }
@@ -344,6 +370,8 @@ fn discover_instances(
             let id = stable_id(&[&manager.to_string(), &display_path]);
             let discovered_by = if path.as_path() == Path::new("/opt/homebrew/bin/brew")
                 || path.as_path() == Path::new("/usr/local/bin/brew")
+                || path.as_path() == Path::new("/home/linuxbrew/.linuxbrew/bin/brew")
+                || path.ends_with(".linuxbrew/bin/brew")
             {
                 vec!["standard_prefix".into()]
             } else if all_environments && !path_in_current_path(&path) {
@@ -381,7 +409,12 @@ fn deep_instance_candidates(manager: ManagerKind) -> Vec<PathBuf> {
         ManagerKind::Pipx => &[".local/bin/pipx"],
         ManagerKind::Uv => &[".local/bin/uv"],
         ManagerKind::Cargo => &[".cargo/bin/cargo"],
-        ManagerKind::Brew => &[],
+        ManagerKind::Brew => &[".linuxbrew/bin/brew"],
+        ManagerKind::Apt
+        | ManagerKind::Dnf
+        | ManagerKind::Pacman
+        | ManagerKind::Snap
+        | ManagerKind::Flatpak => &[],
     };
     for relative in relative_patterns {
         let candidate = home.join(relative);
@@ -455,6 +488,9 @@ fn executable_architecture(path: &Path, depth: usize) -> Option<String> {
     if let Some(architecture) = mach_o_architecture(path) {
         return Some(architecture);
     }
+    if let Some(architecture) = elf_architecture(path) {
+        return Some(architecture);
+    }
     let bytes = read_prefix(path, 512)?;
     let first_line = std::str::from_utf8(&bytes[..bytes.len().min(512)])
         .ok()?
@@ -473,6 +509,24 @@ fn executable_architecture(path: &Path, depth: usize) -> Option<String> {
         PathBuf::from(interpreter)
     };
     executable_architecture(&interpreter_path, depth + 1)
+}
+
+fn elf_architecture(path: &Path) -> Option<String> {
+    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let bytes = read_prefix(&path, 64)?;
+    if bytes.len() < 20 || bytes.get(..4)? != b"\x7fELF" || bytes[4] != 2 {
+        return None;
+    }
+    let machine = match bytes[5] {
+        1 => u16::from_le_bytes(bytes[18..20].try_into().ok()?),
+        2 => u16::from_be_bytes(bytes[18..20].try_into().ok()?),
+        _ => return None,
+    };
+    match machine {
+        62 => Some("x86_64".into()),
+        183 => Some("arm64".into()),
+        _ => None,
+    }
 }
 
 fn mach_o_architecture(path: &Path) -> Option<String> {
@@ -544,13 +598,50 @@ fn cpu_architecture(cpu_type: u32) -> Option<String> {
 
 fn scan_instance(instance: ManagerInstance, options: &ScanOptions) -> PartialScan {
     match instance.manager {
+        ManagerKind::Apt => apt::scan(instance, options),
         ManagerKind::Brew => brew::scan(instance, options),
         ManagerKind::Npm => npm::scan(instance, options),
         ManagerKind::Pnpm => pnpm::scan(instance, options),
         ManagerKind::Pipx => pipx::scan(instance, options),
         ManagerKind::Uv => uv::scan(instance, options),
         ManagerKind::Cargo => cargo::scan(instance, options),
+        ManagerKind::Dnf => dnf::scan(instance, options),
+        ManagerKind::Pacman => pacman::scan(instance, options),
+        ManagerKind::Snap => snap::scan(instance, options),
+        ManagerKind::Flatpak => flatpak::scan(instance, options),
     }
+}
+
+pub(crate) fn companion_executable(instance: &ManagerInstance, names: &[&str]) -> Option<PathBuf> {
+    let parent = Path::new(&instance.executable_path).parent();
+    for name in names {
+        if let Some(candidate) = parent.map(|parent| parent.join(name))
+            && process::is_executable(&candidate)
+        {
+            return Some(candidate);
+        }
+        if let Some(candidate) = process::find_executables(name).into_iter().next() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+pub(crate) fn companion_command(
+    instance: &ManagerInstance,
+    names: &[&str],
+    args: &[&str],
+    options: &ScanOptions,
+) -> Result<process::CommandOutput, process::CommandError> {
+    let executable = companion_executable(instance, names).unwrap_or_else(|| {
+        Path::new(&instance.executable_path)
+            .parent()
+            .unwrap_or_else(|| Path::new(""))
+            .join(names.first().copied().unwrap_or_default())
+    });
+    let mut companion = instance.clone();
+    companion.executable_path = executable.display().to_string();
+    command(&companion, args, options)
 }
 
 pub(crate) fn command(
@@ -598,6 +689,13 @@ pub(crate) fn manager_command_spec(
         "CARGO_HOME",
         "CARGO_INSTALL_ROOT",
         "RUSTUP_HOME",
+        "APT_CONFIG",
+        "DPKG_ROOT",
+        "DNF_SYSTEM_CACHEDIR",
+        "SNAP",
+        "SNAP_DATA",
+        "SNAP_COMMON",
+        "FLATPAK_SYSTEM_DIR",
     ] {
         if let Ok(value) = std::env::var(name) {
             spec.env.insert(name.into(), value);
@@ -622,6 +720,17 @@ pub(crate) fn manager_command_spec(
         spec.env
             .insert("HOMEBREW_NO_INSTALL_CLEANUP".into(), "1".into());
         spec.env.insert("HOMEBREW_NO_ANALYTICS".into(), "1".into());
+    }
+    if matches!(
+        instance.manager,
+        ManagerKind::Apt
+            | ManagerKind::Dnf
+            | ManagerKind::Pacman
+            | ManagerKind::Snap
+            | ManagerKind::Flatpak
+    ) {
+        spec.env.insert("LC_ALL".into(), "C".into());
+        spec.env.insert("LANG".into(), "C".into());
     }
     if instance.manager == ManagerKind::Npm {
         spec.env.insert("NO_UPDATE_NOTIFIER".into(), "1".into());
@@ -699,17 +808,10 @@ pub(crate) fn make_record(
     paths.bins.sort();
     paths.bins.dedup();
 
-    let filesystem_created_at = root.as_ref().and_then(|root| {
-        fs::metadata(root)
-            .and_then(|metadata| metadata.created())
-            .ok()
-            .map(|created| FieldValue {
-                value: Some(DateTime::<Utc>::from(created)),
-                source: "filesystem_birthtime".into(),
-                confidence: Confidence::Estimated,
-                observed_at: observed,
-            })
-    });
+    let (filesystem_created_at, updated_at) = root
+        .as_ref()
+        .map(|root| filesystem_dates(root, observed))
+        .unwrap_or_default();
     let sizes = if options.calculate_sizes {
         root.as_ref()
             .filter(|path| path.exists())
@@ -804,6 +906,7 @@ pub(crate) fn make_record(
             paths,
             dates: InstallationDates {
                 filesystem_created_at,
+                updated_at,
                 ..Default::default()
             },
             sizes,
@@ -822,7 +925,14 @@ pub(crate) fn environment_label(instance: &ManagerInstance) -> String {
     }
     if matches!(
         instance.manager,
-        ManagerKind::Pipx | ManagerKind::Uv | ManagerKind::Cargo
+        ManagerKind::Pipx
+            | ManagerKind::Uv
+            | ManagerKind::Cargo
+            | ManagerKind::Apt
+            | ManagerKind::Dnf
+            | ManagerKind::Pacman
+            | ManagerKind::Snap
+            | ManagerKind::Flatpak
     ) {
         return "default".into();
     }
@@ -857,6 +967,30 @@ pub(crate) fn environment_label(instance: &ManagerInstance) -> String {
         .map(terminal_text)
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "default".into())
+}
+
+type FilesystemDates = (
+    Option<FieldValue<DateTime<Utc>>>,
+    Option<FieldValue<DateTime<Utc>>>,
+);
+
+fn filesystem_dates(root: &Path, observed_at: DateTime<Utc>) -> FilesystemDates {
+    let Ok(metadata) = fs::metadata(root) else {
+        return (None, None);
+    };
+    let created = metadata.created().ok().map(|created| FieldValue {
+        value: Some(DateTime::<Utc>::from(created)),
+        source: "filesystem_birthtime".into(),
+        confidence: Confidence::Estimated,
+        observed_at,
+    });
+    let modified = metadata.modified().ok().map(|modified| FieldValue {
+        value: Some(DateTime::<Utc>::from(modified)),
+        source: "filesystem_mtime".into(),
+        confidence: Confidence::Exact,
+        observed_at,
+    });
+    (created, modified)
 }
 
 pub(crate) fn package_json_bin_names(root: &Path) -> Vec<String> {
@@ -1106,6 +1240,37 @@ mod tests {
             mach_o_architecture(&universal).as_deref(),
             Some("universal")
         );
+    }
+
+    #[test]
+    fn reads_little_and_big_endian_elf_architectures() {
+        let temp = tempfile::tempdir().unwrap();
+        for (name, endian, machine, expected) in [
+            ("x64", 1_u8, 62_u16, "x86_64"),
+            ("arm64", 2_u8, 183_u16, "arm64"),
+        ] {
+            let path = temp.path().join(name);
+            let mut bytes = vec![0_u8; 64];
+            bytes[..4].copy_from_slice(b"\x7fELF");
+            bytes[4] = 2;
+            bytes[5] = endian;
+            let machine_bytes = if endian == 1 {
+                machine.to_le_bytes()
+            } else {
+                machine.to_be_bytes()
+            };
+            bytes[18..20].copy_from_slice(&machine_bytes);
+            fs::write(&path, bytes).unwrap();
+            assert_eq!(elf_architecture(&path).as_deref(), Some(expected));
+        }
+        let elf32 = temp.path().join("elf32");
+        let mut bytes = vec![0_u8; 64];
+        bytes[..4].copy_from_slice(b"\x7fELF");
+        bytes[4] = 1;
+        bytes[5] = 1;
+        bytes[18..20].copy_from_slice(&62_u16.to_le_bytes());
+        fs::write(&elf32, bytes).unwrap();
+        assert_eq!(elf_architecture(&elf32), None);
     }
 
     #[test]
