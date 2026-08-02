@@ -82,6 +82,8 @@ jobs:
           path: ${{ runner.temp }}/pkgscope-${{ matrix.target }}
           format: cyclonedx-json
           output-file: pkgscope-v${{ needs.validate.outputs.version }}-${{ matrix.target }}.cdx.json
+          upload-artifact: false
+          upload-release-assets: false
       - uses: actions/attest-build-provenance@v2
         with:
           subject-path: pkgscope-v${{ needs.validate.outputs.version }}-${{ matrix.target }}.tar.gz
