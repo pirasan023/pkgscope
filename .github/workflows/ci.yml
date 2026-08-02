@@ -164,7 +164,8 @@ jobs:
           pnpm add --global is-number
           pipx install cowsay
           pipx install uv
-          "$HOME/.local/bin/uv" tool install pycowsay
+          pipx_home="$(pipx environment --value PIPX_HOME)"
+          "$pipx_home/venvs/uv/bin/uv" tool install pycowsay
           fixture="$RUNNER_TEMP/cargo-fixture"
           mkdir -p "$fixture/src"
           printf '%s\n' '[package]' 'name="pkgscope-ci-tool"' 'version="0.1.0"' 'edition="2024"' > "$fixture/Cargo.toml"
@@ -176,7 +177,8 @@ jobs:
       - name: Scan npm, pnpm, pipx, uv, Cargo, and Snap from local inventory
         run: |
           export PNPM_HOME="$HOME/.local/share/pnpm"
-          export PATH="$PNPM_HOME/bin:$HOME/.local/bin:$PATH"
+          pipx_home="$(pipx environment --value PIPX_HOME)"
+          export PATH="$pipx_home/venvs/uv/bin:$PNPM_HOME/bin:$HOME/.local/bin:$PATH"
           cargo run --locked -- --quiet --format json \
             --manager npm --manager pnpm --manager pipx --manager uv --manager cargo --manager snap \
             scan > "$RUNNER_TEMP/tools.json"

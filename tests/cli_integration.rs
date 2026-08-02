@@ -188,7 +188,7 @@ fn scans_five_manager_fixtures_and_emits_clean_json_and_plans() {
     );
 
     let mut plan = pkgscope_command(&home, &mock_bin, &cargo_home);
-    plan.args(["removal-plan", "demo-npm", "--quiet"])
+    plan.args(["removal-plan", "demo-npm", "--manager", "npm", "--quiet"])
         .assert()
         .success()
         .stdout(predicates::str::contains("npm uninstall -g demo-npm"))
