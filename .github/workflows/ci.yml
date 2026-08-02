@@ -21,7 +21,7 @@ jobs:
         os: [ubuntu-24.04, macos-14]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_VERSION }}
@@ -35,7 +35,7 @@ jobs:
         run: cargo test --all-targets --locked
       - name: Release build
         run: cargo build --release --locked
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
       - name: Test npm launcher
@@ -59,7 +59,7 @@ jobs:
     name: Static Linux x64 artifact
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - run: sudo apt-get update && sudo apt-get install --yes musl-tools
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -115,7 +115,7 @@ jobs:
             manager: pacman
             package: jq
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: actions/download-artifact@v4
         with:
           name: linux-x64-ci
@@ -145,12 +145,12 @@ jobs:
     name: Ubuntu developer and Snap managers
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_VERSION }}
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
       - name: Install disposable packages through all user-level managers
@@ -160,7 +160,7 @@ jobs:
           npm install --global cowsay pnpm
           pnpm setup
           export PNPM_HOME="$HOME/.local/share/pnpm"
-          export PATH="$PNPM_HOME:$PATH"
+          export PATH="$PNPM_HOME/bin:$PATH"
           pnpm add --global is-number
           pipx install cowsay
           pipx install uv
@@ -176,7 +176,7 @@ jobs:
       - name: Scan npm, pnpm, pipx, uv, Cargo, and Snap from local inventory
         run: |
           export PNPM_HOME="$HOME/.local/share/pnpm"
-          export PATH="$PNPM_HOME:$HOME/.local/bin:$PATH"
+          export PATH="$PNPM_HOME/bin:$HOME/.local/bin:$PATH"
           cargo run --locked -- --quiet --format json \
             --manager npm --manager pnpm --manager pipx --manager uv --manager cargo --manager snap \
             scan > "$RUNNER_TEMP/tools.json"
@@ -191,7 +191,7 @@ jobs:
     name: Flatpak user, system, and named-system installations
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_VERSION }}
@@ -225,7 +225,7 @@ jobs:
     needs: build-linux-x64
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: actions/download-artifact@v4
         with:
           name: linux-x64-ci
@@ -271,7 +271,7 @@ jobs:
     name: Native static Linux ARM64 and npm launcher
     runs-on: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - run: sudo apt-get update && sudo apt-get install --yes musl-tools
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -280,7 +280,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: aarch64-unknown-linux-musl
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
       - run: cargo build --release --locked --target aarch64-unknown-linux-musl
@@ -310,7 +310,7 @@ jobs:
     name: Dependency audit
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_VERSION }}
