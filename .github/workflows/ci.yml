@@ -75,7 +75,7 @@ jobs:
           file "$binary" | grep -Eq 'ELF 64-bit.*x86-64'
           if readelf -d "$binary" | grep -q NEEDED; then exit 1; fi
           "$binary" --version | grep -Fx 'pkgscope 0.3.0'
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: linux-x64-ci
           path: target/x86_64-unknown-linux-musl/release/pkgscope
@@ -116,7 +116,7 @@ jobs:
             package: jq
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: linux-x64-ci
           path: dist
@@ -228,7 +228,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: linux-x64-ci
           path: dist
@@ -258,7 +258,7 @@ jobs:
     needs: build-linux-x64
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: linux-x64-ci
           path: dist
