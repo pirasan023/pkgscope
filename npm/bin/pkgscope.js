@@ -16,8 +16,8 @@ function platformPackage() {
   if (process.platform !== 'darwin') {
     fail(`unsupported platform ${process.platform}/${process.arch}; v0.2 supports macOS only`);
   }
-  if (process.arch === 'arm64') return '@pkgscope/darwin-arm64';
-  if (process.arch === 'x64') return '@pkgscope/darwin-x64';
+  if (process.arch === 'arm64') return '@pirasan023/pkgscope-darwin-arm64';
+  if (process.arch === 'x64') return '@pirasan023/pkgscope-darwin-x64';
   fail(`unsupported macOS architecture ${process.arch}`);
 }
 

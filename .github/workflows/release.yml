@@ -136,7 +136,7 @@ jobs:
             tar -xzf "dist/pkgscope-${target}/pkgscope-v${version}-${target}.tar.gz" -C "$package_dir/bin"
             cp LICENSE "$package_dir/LICENSE"
             jq -n \
-              --arg name "@pkgscope/darwin-${npm_arch}" \
+              --arg name "@pirasan023/pkgscope-darwin-${npm_arch}" \
               --arg version "$version" \
               --arg cpu "$npm_arch" \
               '{name:$name,version:$version,description:"pkgscope native binary",license:"MIT",repository:{type:"git",url:"git+https://github.com/pirasan023/pkgscope.git"},os:["darwin"],cpu:[$cpu],files:["bin/pkgscope","LICENSE"],publishConfig:{access:"public",provenance:true}}' \

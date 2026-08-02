@@ -28,8 +28,8 @@
     "darwin"
   ],
   "optionalDependencies": {
-    "@pkgscope/darwin-arm64": "0.2.0",
-    "@pkgscope/darwin-x64": "0.2.0"
+    "@pirasan023/pkgscope-darwin-arm64": "0.2.0",
+    "@pirasan023/pkgscope-darwin-x64": "0.2.0"
   },
   "publishConfig": {
     "access": "public",
